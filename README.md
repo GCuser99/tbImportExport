@@ -9,8 +9,6 @@ documented at <https://docs.twinbasic.com/Features/Packages/Import-Export-Tool>.
 2. In project, select desired build bitness (32-bit recommended for max portability)
 3. Click Build.
 
-WinDevLib is **not** required. See the note at the top of `modWin32.twin`.
-
 ## Files
 
 | File | Contents |
