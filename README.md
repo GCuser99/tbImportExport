@@ -97,8 +97,8 @@ should load and build — but your build of the IDE is the only authority on tha
 
 **Zero-length arrays.** VB-family arrays can't have zero elements, so `Content`/`Revisions` are always paired with an explicit `ContentLen`/`RevisionCount`. Never trust `UBound` on them.
 
-## Not yet done
+## Limitations
 
-- **Long path support.** Anything beyond ~260 characters fails. The W APIs are already in use, so this is just a `\\?\` prefix applied after `AbsPath`.
+- **No long path support.** Anything beyond ~260 characters fails.
 - **Reparse points / symlinks** are followed like ordinary directories during export, same as the Python version.
 - **The `revisions` array** is preserved on round-trip but never populated on export, matching the reference tool.
