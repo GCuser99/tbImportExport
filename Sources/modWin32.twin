@@ -1,7 +1,7 @@
-' Copyright (c) 2026
+' https://github.com/GCuser99/tbImportExport/tree/main
 ' License: MIT
 '
-' All of the declares in this module are from WinDevLib.
+' All of the declares in this module are sourced from WinDevLib.
 ' These can be removed if WinDevLib package is referenced
 
 Private Module modWin32

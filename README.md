@@ -5,8 +5,8 @@ documented at <https://docs.twinbasic.com/Features/Packages/Import-Export-Tool>.
 
 ## Setup
 
-1. Download ImportExport.twinproj Or load the Source .twin files into a twinBASIC console app project
-2. In project, select desired build bitness (32-bit recommended for max portability)
+1. Download ImportExport.twinproj or load the Source .twin files into a twinBASIC console app project.
+2. In project, select desired build bitness (32-bit recommended for max portability).
 3. Click Build.
 
 ## Files
