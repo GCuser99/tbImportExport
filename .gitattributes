@@ -22,6 +22,9 @@
 # twinBASIC project (twinproj)
 *.[tT][wW][iI][nN][pP][rR][oO][jJ] binary
 
+# twinBASIC package (twinpack)
+*.[tT][wW][iI][nN][pP][aA][cC][kK] binary
+
 # VBS - prevent LF normalization
 *.[vV][bB][sS] -text diff linguist-language=VBScript
 
