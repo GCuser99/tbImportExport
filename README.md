@@ -27,7 +27,7 @@ documented at <https://docs.twinbasic.com/Features/Packages/Import-Export-Tool>.
 
 ## Usage
 
-Use `import` flag to unpack a .twinproj or .twinpack file. Conversely, use `export` to pack an unpacked directory tree into a .twinproj or .twinpack file.
+Use `import` flag to unpack a .twinproj or .twinpack file into a text file directory tree. Conversely, use `export` to pack an unpacked directory tree into a .twinproj or .twinpack file.
 ```
 impexp import <file.twinproj|.twinpack> [output_dir]
 impexp export <input_dir> <output.twinproj|.twinpack>
