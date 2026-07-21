@@ -75,28 +75,6 @@ Before trusting this on real work: import a project, export it back, and open th
 in twinBASIC. The IDE regenerates the reset metadata on open, so a round-tripped file
 should load and build — but your build of the IDE is the only authority on that.
 
-## Things worth knowing
-
-**The magic number.** `0xEA0BA51C` doesn't fit in a signed `Long`, and twinBASIC has no unsigned integer types yet. It's stored as its two's-complement value (`-368335588`). Only equality is ever tested against it, so the sign never matters. If the compiler rejects the hex literal, substitute the decimal.
-
-**Revision is `u64` on the wire, `LongLong` here.** Signed, but it round-trips bit-exact, which is all the format requires.
-
-**Sort order is load-bearing.** `OrdinalCompare` uses `vbBinaryCompare`. If you swap in `vbTextCompare` or `lstrcmpiW`, exports stop being byte-identical to the reference tool for any project with mixed-case or non-ASCII filenames, because Python's `sorted()` orders by code point. `T_UnicodeAndOrdering` guards this — it asserts that `Zebra` sorts before `apple`.
-
-**Errors raised inside a class lose their description.** twinBASIC classes are COM objects, and an error crossing that vtable boundary is flattened to an HRESULT; the caller sees a bare "Automation error". `ByteReader` is the only class here that raises, and it works around this by stashing the message in `mErrorText` (exposed as `ErrorText`) before raising, with `ParseBuffer` catching at the module boundary and re-raising with the text restored. **If you add a raise to `Entry` or `ByteBuffer`, it needs the same treatment** or the user-facing error message silently degrades.
-
-**Exit codes work.** `Halt` uses `ExitProcess`, and the code reaches the shell — verified with `impexp --self-test nosuchfile` followed by `echo %ERRORLEVEL%`, which prints 1. Non-zero on usage errors, unhandled errors, a missing sample, and any failed test; zero otherwise. Safe to gate a CI step on. `ExitProcess` terminates immediately and skips `Class_Terminate`, which is fine here — nothing holds an OS resource at that point.
-
-**32-bit is a sound default.** A 32-bit build runs on x64 via WOW64, and on Windows on ARM the x86 emulator has been available since Windows 10 ARM, whereas x64 emulation needs Windows 11 — so the 32-bit binary is the more portable artifact, not a compromise. Nothing here benefits from 64-bit registers or address space.
-
-**Memory is proportional to file size, not streamed.** The whole file is held in RAM and copied a few times: on import, once by `ReadWholeFile`, again by `ByteReader.Init` (`m = buf` copies, VB arrays don't alias), and again per blob into each `Entry`. Peak is roughly 3x the file size on both import and export. In a 32-bit process, with ~1.5 GB practically usable, that puts the ceiling somewhere near a 350 MB project file — far beyond any real twinproj. If that ever mattered, the remaining easy win is `ByteReader.Init`, which could take a pointer instead of copying.
-
-**`Dir$` is avoided on purpose.** `BuildTree` recurses, and `Dir$` can't have two enumerations in flight. `ListDirectory` completes the `FindFirstFileW` loop before returning, so recursion afterwards is safe.
-
-**`FILETIME` members are `Long` pairs, not `Currency`.** `WIN32_FIND_DATAW` is 4-byte aligned; an 8-byte member risks padding that would shift `cFileName` and give you garbage filenames.
-
-**Zero-length arrays.** VB-family arrays can't have zero elements, so `Content`/`Revisions` are always paired with an explicit `ContentLen`/`RevisionCount`. Never trust `UBound` on them.
-
 ## Limitations
 
 - **No long path support.** Anything beyond ~260 characters fails.
