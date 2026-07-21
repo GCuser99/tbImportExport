@@ -1,4 +1,4 @@
-# impexp — twinBASIC port
+# Impexp Console App
 
 A twinBASIC port of `impexp.py`, the standalone twinproj/twinpack import/export tool
 documented at <https://docs.twinbasic.com/Features/Packages/Import-Export-Tool>.
