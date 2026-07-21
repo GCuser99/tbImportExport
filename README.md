@@ -10,7 +10,7 @@ documented at <https://docs.twinbasic.com/Features/Packages/Import-Export-Tool>.
 3. Click Build.
 4. Open Command line window
 5. Cd to Build location.
-6. Follow examples in Usage section.
+6. Follow examples in [Usage section]().
 
 ## Files
 
