@@ -5,10 +5,9 @@ documented at <https://docs.twinbasic.com/Features/Packages/Import-Export-Tool>.
 
 ## Setup
 
-1. New project → **Console Application** (this is what gives you the built-in `Console` class and a real console rather than a GUI subsystem).
-2. Add each `.twin` file to the project.
-3. Set the startup point to `modMain.Main`.
-4. Build x86 or x64 — the code is `PtrSafe`/`LongPtr`-clean and works as either.
+1. Download ImportExport.twinproj Or load the Source .twin files into a twinBASIC console app project
+2. In project, select desired build bitness (32-bit recommended for max portability)
+3. Click Build.
 
 WinDevLib is **not** required. See the note at the top of `modWin32.twin`.
 
@@ -19,7 +18,7 @@ WinDevLib is **not** required. See the note at the top of `modWin32.twin`.
 | `Entry.twin` | Tree node. Arrays are private with accessors. |
 | `ByteBuffer.twin` | Append-only output buffer with capacity doubling. |
 | `ByteReader.twin` | Bounds-checked little-endian cursor. |
-| `modWin32.twin` | Win32 Declares (optional if reference to WinDevLib) 
+| `modWin32.twin` | Win32 Declares (optional if reference to WinDevLib) |
 | `modShared.twin` | UTF-8, path/filesystem helpers, ordinal sort. |
 | `modImpExp.twin` | Parser, serializer, import, export. |
 | `modSelfTest.twin` | Test suite. |
@@ -48,10 +47,18 @@ invocation therefore can't succeed as shipped.
 Expected output:
 
 ```
-  [INFO] root "Sample", 13 files, 7 directories, 62713 bytes
+  [INFO] root "XXXXXXXXX", 6 files, 6 directories, 380511 bytes
   [PASS] Parse sample (invariants + re-parse consistency)
-  ...
-10/10 tests passed.
+  [PASS] In-memory round-trip (parse -> serialize -> re-parse)
+  [PASS] Serializer idempotence (double round-trip)
+  [PASS] Disk round-trip (import -> export -> re-import)
+  [PASS] Empty project round-trip
+  [PASS] Single-file project round-trip
+  [PASS] Flags field preserved on round-trip
+  [PASS] Unicode names and ordinal ordering
+  [PASS] Bad magic rejected
+  [PASS] Truncated input rejected
+  10/10 tests passed.
 ```
 
 The sample tests assert **invariants** — non-empty root name, root is a directory,
@@ -97,8 +104,3 @@ should load and build — but your build of the IDE is the only authority on tha
 - **Long path support.** Anything beyond ~260 characters fails. The W APIs are already in use, so this is just a `\\?\` prefix applied after `AbsPath`.
 - **Reparse points / symlinks** are followed like ordinary directories during export, same as the Python version.
 - **The `revisions` array** is preserved on round-trip but never populated on export, matching the reference tool.
-
-## Version control
-
-If this goes in git, add a `.gitattributes` with `*.twin text eol=crlf` to stop line
-endings drifting on machines with different `core.autocrlf` settings.
