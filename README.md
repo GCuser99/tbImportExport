@@ -65,7 +65,7 @@ The sample tests assert **invariants** — non-empty root name, root is a direct
 file and directory counts stable across a re-parse — rather than constants tied to one
 particular fixture. The observed shape is reported as `[INFO]`, not asserted.
 
-## What the suite does and doesn't prove
+### What the suite does and doesn't prove
 
 It proves the port is self-consistent: parse, serialize, and disk round-trips all agree,
 and the output matches the round-trip behaviour the docs specify (directories before
