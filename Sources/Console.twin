@@ -1,0 +1,73 @@
+' Copyright (c) 2026
+' License: MIT
+[PredeclaredId]
+Private Class Console
+	
+    ' This class gives you a start for working with the console.
+    ' Offers simple Cls / WriteLine / ReadLine members
+    
+    Private stdIn As LongPtr
+    Private stdOut As LongPtr
+    Private inputBuffer As String
+    
+    Sub New(Optional MaxInputLen As Long = 256)
+        stdIn = GetStdHandle(STD_INPUT_HANDLE)
+        stdOut = GetStdHandle(STD_OUTPUT_HANDLE)
+        inputBuffer = String(MaxInputLen, vbNullChar)
+    End Sub
+    
+    Sub Cls()
+    	' see https://learn.microsoft.com/en-us/windows/console/clearing-the-screen
+        Dim csbi As CONSOLE_SCREEN_BUFFER_INFO
+        Dim scrollRect  As SMALL_RECT
+        Dim scrollTarget As COORD
+        Dim fill As CHAR_INFO
+
+        ' Get the number of character cells in the current buffer.
+        If GetConsoleScreenBufferInfo(stdOut, csbi) = 0 Then Exit Sub
+
+        ' Scroll the rectangle of the entire buffer.
+        scrollRect.Left = 0
+        scrollRect.Top = 0
+        scrollRect.Right = csbi.dwSize.x
+        scrollRect.Bottom = csbi.dwSize.y
+
+        ' Scroll it upwards off the top of the buffer With a magnitude of the entire height.
+        scrollTarget.x = 0
+        scrollTarget.y = (0 - csbi.dwSize.y)
+
+        ' Fill With Empty spaces with the buffer's default text attribute.
+        fill.UnicodeChar = AscW(" ")
+        fill.Attributes = csbi.wAttributes
+
+        ' Do the scroll
+        Dim scrollTargetXY As Long = scrollTarget.x Or (CLng(scrollTarget.y) << 16)
+        ScrollConsoleScreenBufferW(stdOut, scrollRect, ByVal vbNullPtr, scrollTargetXY, fill)
+
+        ' Move the cursor to the top left corner too.
+        csbi.dwCursorPosition.x = 0
+        csbi.dwCursorPosition.y = 0
+
+        Dim dwCursorPositionXY As Long = csbi.dwCursorPosition.x Or (CLng(csbi.dwCursorPosition.y) << 16)
+        SetConsoleCursorPosition(stdOut, dwCursorPositionXY)
+    End Sub
+    
+    Sub WriteLine(ByVal Value As String)
+        Dim writtenChars As Long
+        Value &= vbLf
+    	WriteConsoleW(stdOut, StrPtr(Value), Len(Value), writtenChars, 0)
+        If writtenChars <> Len(Value) Then
+        	Err.Raise 5, , "failed to write to the console"
+        End If
+    End Sub
+    
+    Function ReadLine() As String
+        Dim readChars As Long
+        Dim inputControl As CONSOLE_READCONSOLE_CONTROL
+        inputControl.nLength = LenB(inputControl)
+        inputControl.dwCtrlWakeupMask = 1 << Asc(vbLf)      ' stops after encountering vbLf input
+        ReadConsoleW(stdIn, StrPtr(inputBuffer), Len(inputBuffer), readChars, ByVal VarPtr(inputControl))
+        Return Replace(SysAllocStringLen(inputBuffer, readChars - 1), vbCr, "")
+    End Function
+    
+End Class

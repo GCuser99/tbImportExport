@@ -1,0 +1,100 @@
+' Copyright (c) 2026
+' License: MIT
+'
+' Entry -- one node in a twinproj/twinpack entry tree.
+'
+' Arrays are held privately with accessor methods rather than as Public
+' members: VB6 forbids Public arrays in class modules, and while twinBASIC
+' relaxes that, keeping them private also stops callers from ReDim'ing a
+' member out from under us.
+
+Private Class Entry
+
+    Option Explicit
+
+    Public Kind As EntryKindEnum        ' ekFile / ekDirectory
+    Public Name As String
+    Public Revision As LongLong         ' u64 on the wire; signed here, round-trips bit-exact
+    Public Flags As Long                ' u32 bitfield
+    Public Category As Byte             ' u8
+    Public Children As Collection       ' of Entry (directories only)
+
+    Private mContent() As Byte
+    Private mContentLen As Long
+
+    Private mRevisions() As Long
+    Private mRevisionCount As Long
+
+    Private Sub Class_Initialize()
+        Set Children = New Collection
+        mContentLen = 0
+        mRevisionCount = 0
+    End Sub
+
+    ' ---------------------------------------------------------------- content
+
+    Public Property Get ContentLen() As Long
+        Return mContentLen
+    End Property
+
+    Public Sub SetContent(ByRef b() As Byte, ByVal length As Long)
+        mContentLen = length
+        If length > 0 Then
+            ReDim mContent(0 To length - 1)
+            CopyMemory mContent(0), b(0), length
+        Else
+            Erase mContent
+        End If
+    End Sub
+
+    ' Returns a copy. The array always has at least one element so that
+    ' callers can pass it around without worrying about unallocated arrays;
+    ' always pair it with ContentLen.
+    Public Function GetContent() As Byte()
+        Dim out() As Byte
+        If mContentLen > 0 Then
+            ReDim out(0 To mContentLen - 1)
+            CopyMemory out(0), mContent(0), mContentLen
+        Else
+            ReDim out(0 To 0)
+        End If
+        Return out
+    End Function
+
+    ' Direct byte access without the copy -- used by the comparison helpers
+    ' in the self-test where copying every file twice would be wasteful.
+    Public Property Get ContentByte(ByVal index As Long) As Byte
+        Return mContent(index)
+    End Property
+
+    ' -------------------------------------------------------------- revisions
+
+    Public Property Get RevisionCount() As Long
+        Return mRevisionCount
+    End Property
+
+    Public Sub AllocRevisions(ByVal count As Long)
+        mRevisionCount = count
+        If count > 0 Then
+            ReDim mRevisions(0 To count - 1)
+        Else
+            Erase mRevisions
+        End If
+    End Sub
+
+    Public Property Get RevisionItem(ByVal index As Long) As Long
+        Return mRevisions(index)
+    End Property
+
+    Public Property Let RevisionItem(ByVal index As Long, ByVal value As Long)
+        mRevisions(index) = value
+    End Property
+
+    ' ----------------------------------------------------------------- helper
+
+    Public Function AddChild(ByVal child As Entry) As Entry
+        Children.Add child
+        Return child
+    End Function
+
+End Class

@@ -1,0 +1,500 @@
+' Copyright (c) 2026
+' License: MIT
+'
+' modSelfTest -- self-test suite.
+'
+' Differences from the Python original, which are deliberate:
+'
+'   * The sample file is OPTIONAL. The Python version hardcodes a path to
+'     indexer/sample.twinpack in twinBASIC's own development repository and
+'     exits(1) when it is absent -- which is every time, since that fixture
+'     is not part of the published download. Here the four sample-driven
+'     tests are skipped with [SKIP] when no sample is supplied, and the four
+'     synthetic tests still run.
+'
+'   * The sample tests assert INVARIANTS rather than the fixture-specific
+'     constants ("CustomControlsPackage", 22 files, 7 directories) that the
+'     Python version checks. Those only hold for one particular file. The
+'     observed name and counts are printed as [INFO] instead.
+'
+'   * Each test parses its own copy of the sample rather than sharing state,
+'     so a failure in one cannot cascade into a misleading failure or a null
+'     object reference in another.
+'
+'   Usage:
+'   impexp --self-test [path-to-a-.twinproj-or-.twinpack]
+
+Private Module modSelfTest
+
+    Option Explicit
+
+    Private mPassed As Long
+    Private mFailed As Long
+    Private mSkipped As Long
+
+    Private mTmpDir As String
+    Private mSamplePath As String
+    Private mHasSample As Boolean
+    Private mSampleBuf() As Byte
+    Private mSampleLen As Long
+
+    ' ---------------------------------------------------------- assertions
+
+    Private Sub AssertEqL(ByVal actual As Long, ByVal expected As Long, ByVal msg As String)
+        If actual <> expected Then
+            Err.Raise vbObjectError + 2000, "SelfTest", _
+                      msg & ": expected " & CStr(expected) & ", got " & CStr(actual)
+        End If
+    End Sub
+
+    Private Sub AssertEqS(ByVal actual As String, ByVal expected As String, ByVal msg As String)
+        If actual <> expected Then
+            Err.Raise vbObjectError + 2000, "SelfTest", _
+                      msg & ": expected """ & expected & """, got """ & actual & """"
+        End If
+    End Sub
+
+    Private Sub AssertTrue(ByVal cond As Boolean, ByVal msg As String)
+        If Not cond Then
+            Err.Raise vbObjectError + 2000, "SelfTest", msg
+        End If
+    End Sub
+
+    Private Sub Fail(ByVal msg As String)
+        Err.Raise vbObjectError + 2000, "SelfTest", msg
+    End Sub
+
+    Private Sub Info(ByVal msg As String)
+        Say "  [INFO] " & msg
+    End Sub
+
+    ' ------------------------------------------------------------- helpers
+
+    Private Function BytesEqual(ByRef a() As Byte, ByVal na As Long, _
+                                ByRef b() As Byte, ByVal nb As Long) As Boolean
+        If na <> nb Then Return False
+        Dim i As Long
+        For i = 0 To na - 1
+            If a(i) <> b(i) Then Return False
+        Next
+        Return True
+    End Function
+
+    Private Function EntryContentEqual(ByVal x As Entry, ByVal y As Entry) As Boolean
+        If x.ContentLen <> y.ContentLen Then Return False
+        Dim i As Long
+        For i = 0 To x.ContentLen - 1
+            If x.ContentByte(i) <> y.ContentByte(i) Then Return False
+        Next
+        Return True
+    End Function
+
+    Private Sub FlattenTree(ByVal e As Entry, ByVal prefix As String, _
+                            ByVal paths As Collection, ByVal entries As Collection)
+        If e.Kind = ekFile Then
+            paths.Add prefix & e.Name
+            entries.Add e
+        Else
+            Dim i As Long
+            For i = 1 To e.Children.Count
+                FlattenTree e.Children.Item(i), prefix & e.Name & "/", paths, entries
+            Next
+        End If
+    End Sub
+
+    Private Sub WalkDisk(ByVal dirPath As String, ByVal prefix As String, ByVal paths As Collection)
+        Dim names() As String, isDir() As Boolean, count As Long, i As Long
+        ListDirectory dirPath, names, isDir, count
+
+        Dim dirs() As String, files() As String
+        Dim nd As Long, nf As Long
+        ReDim dirs(0 To IIf(count = 0, 0, count - 1))
+        ReDim files(0 To IIf(count = 0, 0, count - 1))
+
+        For i = 0 To count - 1
+            If isDir(i) Then
+                dirs(nd) = names(i)
+                nd = nd + 1
+            Else
+                files(nf) = names(i)
+                nf = nf + 1
+            End If
+        Next
+        SortStrings dirs, nd
+        SortStrings files, nf
+
+        For i = 0 To nd - 1
+            WalkDisk JoinPath(dirPath, dirs(i)), prefix & dirs(i) & "/", paths
+        Next
+        For i = 0 To nf - 1
+            paths.Add prefix & files(i)
+        Next
+    End Sub
+
+    Private Sub CountTree(ByVal e As Entry, ByRef fileCount As Long, ByRef dirCount As Long)
+        If e.Kind = ekFile Then
+            fileCount = fileCount + 1
+        Else
+            dirCount = dirCount + 1
+            Dim i As Long
+            For i = 1 To e.Children.Count
+                CountTree e.Children.Item(i), fileCount, dirCount
+            Next
+        End If
+    End Sub
+
+    Private Sub CountRoot(ByVal root As Entry, ByRef fileCount As Long, ByRef dirCount As Long)
+        fileCount = 0
+        dirCount = 0
+        Dim i As Long
+        For i = 1 To root.Children.Count
+            CountTree root.Children.Item(i), fileCount, dirCount
+        Next
+    End Sub
+
+    ' ------------------------------------------- tests requiring a sample
+
+    ' Invariants that hold for ANY well-formed file, plus a re-parse
+    ' consistency check. The observed shape is reported, not asserted.
+    Private Sub T_ParseSample()
+        Dim root As Entry
+        Set root = ParseBuffer(mSampleBuf, mSampleLen)
+
+        AssertTrue Len(root.Name) > 0, "root name is empty"
+        AssertEqL root.Kind, ekDirectory, "root kind"
+
+        Dim fc As Long, dc As Long
+        CountRoot root, fc, dc
+
+        ' The tree must survive a serialize/re-parse with identical shape.
+        Dim buf() As Byte, n As Long
+        buf = SerializeTree(root, n)
+        Dim root2 As Entry
+        Set root2 = ParseBuffer(buf, n)
+
+        AssertEqS root2.Name, root.Name, "root name after re-parse"
+        Dim fc2 As Long, dc2 As Long
+        CountRoot root2, fc2, dc2
+        AssertEqL fc2, fc, "file count after re-parse"
+        AssertEqL dc2, dc, "dir count after re-parse"
+
+        Info "root """ & root.Name & """, " & CStr(fc) & " files, " & _
+             CStr(dc) & " directories, " & CStr(mSampleLen) & " bytes"
+    End Sub
+
+    ' Parses its own copy -- does not depend on T_ParseSample having run.
+    Private Sub T_InMemoryRoundTrip()
+        Dim root As Entry
+        Set root = ParseBuffer(mSampleBuf, mSampleLen)
+
+        Dim buf2() As Byte, len2 As Long
+        buf2 = SerializeTree(root, len2)
+
+        Dim root2 As Entry
+        Set root2 = ParseBuffer(buf2, len2)
+
+        Dim p1 As New Collection, e1 As New Collection
+        Dim p2 As New Collection, e2 As New Collection
+        FlattenTree root, "", p1, e1
+        FlattenTree root2, "", p2, e2
+
+        AssertEqL p1.Count, p2.Count, "file count"
+        Dim i As Long
+        For i = 1 To p1.Count
+            AssertEqS CStr(p1.Item(i)), CStr(p2.Item(i)), "path[" & CStr(i) & "]"
+            If Not EntryContentEqual(e1.Item(i), e2.Item(i)) Then
+                Fail "content mismatch: " & CStr(p1.Item(i))
+            End If
+        Next
+    End Sub
+
+    Private Sub T_Idempotence()
+        Dim once() As Byte, onceLen As Long
+        Dim twice() As Byte, twiceLen As Long
+
+        once = SerializeTree(ParseBuffer(mSampleBuf, mSampleLen), onceLen)
+        twice = SerializeTree(ParseBuffer(once, onceLen), twiceLen)
+
+        If Not BytesEqual(once, onceLen, twice, twiceLen) Then
+            Fail CStr(onceLen) & " vs " & CStr(twiceLen) & " bytes (or differing content)"
+        End If
+    End Sub
+
+    Private Sub T_DiskRoundTrip()
+        Dim dir1 As String, dir2 As String, rtFile As String
+        dir1 = JoinPath(mTmpDir, "import1")
+        dir2 = JoinPath(mTmpDir, "import2")
+        rtFile = JoinPath(mTmpDir, "roundtrip.bin")
+
+        DoImport mSamplePath, dir1, True
+        DoExport dir1, rtFile, True
+        DoImport rtFile, dir2, True
+
+        Dim a As New Collection, b As New Collection
+        WalkDisk dir1, "", a
+        WalkDisk dir2, "", b
+        AssertEqL a.Count, b.Count, "file count"
+
+        Dim i As Long
+        Dim ba() As Byte, na As Long
+        Dim bb() As Byte, nb As Long
+        For i = 1 To a.Count
+            AssertEqS CStr(a.Item(i)), CStr(b.Item(i)), "path[" & CStr(i) & "]"
+            ReadWholeFile JoinPath(dir1, Replace$(CStr(a.Item(i)), "/", "\")), ba, na
+            ReadWholeFile JoinPath(dir2, Replace$(CStr(b.Item(i)), "/", "\")), bb, nb
+            If Not BytesEqual(ba, na, bb, nb) Then
+                Fail "content mismatch: " & CStr(a.Item(i))
+            End If
+        Next
+    End Sub
+
+    ' ------------------------------------------------------ synthetic tests
+
+    Private Sub T_EmptyProject()
+        Dim tree As Entry
+        Set tree = New Entry
+        tree.Kind = ekDirectory
+        tree.Name = "Empty"
+
+        Dim buf() As Byte, n As Long
+        buf = SerializeTree(tree, n)
+
+        Dim rt As Entry
+        Set rt = ParseBuffer(buf, n)
+        AssertEqS rt.Name, "Empty", "name"
+        AssertEqL rt.Children.Count, 0, "children"
+    End Sub
+
+    Private Sub T_SingleFile()
+        Dim content() As Byte
+        Dim contentLen As Long
+        Utf8Encode "Hello twinBASIC", content, contentLen
+
+        Dim f As Entry
+        Set f = New Entry
+        f.Kind = ekFile
+        f.Name = "test.twin"
+        f.Revision = 2
+        f.SetContent content, contentLen
+        f.AllocRevisions 0
+
+        Dim tree As Entry
+        Set tree = New Entry
+        tree.Kind = ekDirectory
+        tree.Name = "Mini"
+        tree.Children.Add f
+
+        Dim buf() As Byte, n As Long
+        buf = SerializeTree(tree, n)
+
+        Dim rt As Entry
+        Set rt = ParseBuffer(buf, n)
+        AssertEqL rt.Children.Count, 1, "children"
+
+        Dim got As Entry
+        Set got = rt.Children.Item(1)
+        AssertEqS got.Name, "test.twin", "filename"
+        If Not EntryContentEqual(got, f) Then Fail "content mismatch"
+    End Sub
+
+    Private Sub T_FlagsPreserved()
+        Dim f As Entry
+        Set f = New Entry
+        f.Kind = ekFile
+        f.Name = "h.twin"
+        f.Revision = 2
+        f.Flags = IE_FLAGS_HIDDEN Or IE_FLAGS_VIRTUAL
+        Dim one(0 To 0) As Byte
+        one(0) = Asc("x")
+        f.SetContent one, 1
+        f.AllocRevisions 0
+
+        Dim tree As Entry
+        Set tree = New Entry
+        tree.Kind = ekDirectory
+        tree.Name = "WithFlags"
+        tree.Flags = IE_FLAGS_HIDDEN
+        tree.Children.Add f
+
+        Dim buf() As Byte, n As Long
+        buf = SerializeTree(tree, n)
+
+        Dim rt As Entry
+        Set rt = ParseBuffer(buf, n)
+        AssertEqL rt.Flags, IE_FLAGS_HIDDEN, "root flags"
+        AssertEqL rt.Children.Item(1).Flags, IE_FLAGS_HIDDEN Or IE_FLAGS_VIRTUAL, "file flags"
+    End Sub
+
+    ' Unicode names and content survive the UTF-8 layer, and the ordinal
+    ' sort is exercised by names that a case-insensitive compare would
+    ' order differently.
+    Private Sub T_UnicodeAndOrdering()
+        Dim tree As Entry
+        Set tree = New Entry
+        tree.Kind = ekDirectory
+        tree.Name = "Ordering"
+
+        Dim names(0 To 3) As String
+        names(0) = "Zebra.twin"
+        names(1) = "apple.twin"
+        names(2) = ChrW$(&H00E9) & "clair.twin"      ' e-acute
+        names(3) = ChrW$(&H65E5) & ChrW$(&H672C) & ".twin"  ' CJK
+
+        Dim i As Long
+        Dim body() As Byte, bodyLen As Long
+        For i = 0 To 3
+            Dim f As Entry
+            Set f = New Entry
+            f.Kind = ekFile
+            f.Name = names(i)
+            f.Revision = 2
+            Utf8Encode "content " & names(i), body, bodyLen
+            f.SetContent body, bodyLen
+            f.AllocRevisions 0
+            tree.Children.Add f
+        Next
+
+        Dim buf() As Byte, n As Long
+        buf = SerializeTree(tree, n)
+
+        Dim rt As Entry
+        Set rt = ParseBuffer(buf, n)
+        AssertEqL rt.Children.Count, 4, "children"
+        For i = 0 To 3
+            AssertEqS rt.Children.Item(i + 1).Name, names(i), "name[" & CStr(i) & "]"
+        Next
+
+        ' Ordinal sort must put uppercase Z before lowercase a.
+        Dim s(0 To 1) As String
+        s(0) = "apple"
+        s(1) = "Zebra"
+        SortStrings s, 2
+        AssertEqS s(0), "Zebra", "ordinal sort places uppercase first"
+    End Sub
+
+    Private Sub T_BadMagicRejected()
+        Dim junk() As Byte
+        Dim n As Long
+        Utf8Encode "not a twinpack!!", junk, n
+
+        On Error GoTo Caught
+        ParseBuffer junk, n
+        On Error GoTo 0
+        Fail "should have thrown"
+        Exit Sub
+Caught:
+        If InStr(Err.Description, "Bad magic") = 0 Then
+            Fail "wrong error: " & Err.Description
+        End If
+    End Sub
+
+    Private Sub T_TruncationRejected()
+        Dim tree As Entry
+        Set tree = New Entry
+        tree.Kind = ekDirectory
+        tree.Name = "Trunc"
+
+        Dim buf() As Byte, n As Long
+        buf = SerializeTree(tree, n)
+
+        On Error GoTo Caught
+        ParseBuffer buf, n - 1        ' claim the file is one byte shorter
+        On Error GoTo 0
+        Fail "should have thrown"
+        Exit Sub
+Caught:
+        If InStr(Err.Description, "Truncated") = 0 Then
+            Fail "wrong error: number=0x" & Hex$(Err.Number) & _
+                 " source=""" & Err.Source & """ desc=""" & Err.Description & """"
+        End If
+    End Sub
+
+    ' ------------------------------------------------------------- runner
+
+    Private Sub RunTest(ByVal id As Long, ByVal name As String, ByVal needsSample As Boolean)
+        If needsSample And Not mHasSample Then
+            Say "  [SKIP] " & name
+            mSkipped = mSkipped + 1
+            Exit Sub
+        End If
+
+        On Error GoTo Failed
+        Select Case id
+            Case 1:  T_ParseSample
+            Case 2:  T_InMemoryRoundTrip
+            Case 3:  T_Idempotence
+            Case 4:  T_DiskRoundTrip
+            Case 5:  T_EmptyProject
+            Case 6:  T_SingleFile
+            Case 7:  T_FlagsPreserved
+            Case 8:  T_UnicodeAndOrdering
+            Case 9:  T_BadMagicRejected
+            Case 10: T_TruncationRejected
+        End Select
+        Say "  [PASS] " & name
+        mPassed = mPassed + 1
+        Exit Sub
+Failed:
+        Say "  [FAIL] " & name
+        Say "         " & Err.Description
+        mFailed = mFailed + 1
+    End Sub
+
+    ' samplePath may be "" -- the sample-driven tests are then skipped.
+    ' A supplied-but-missing path is an error, since it is almost certainly
+    ' a typo rather than an intentional omission.
+    Public Function RunSelfTest(ByVal samplePath As String) As Long
+        mPassed = 0
+        mFailed = 0
+        mSkipped = 0
+        mSamplePath = samplePath
+        mHasSample = False
+
+        If Len(samplePath) > 0 Then
+            If Not PathExists(samplePath) Then
+                Say "Sample not found: " & samplePath
+                Return 1
+            End If
+            ReadWholeFile samplePath, mSampleBuf, mSampleLen
+            mHasSample = True
+        End If
+
+        mTmpDir = JoinPath(Environ$("TEMP"), "impexp-test-" & CStr(CLng(Timer * 1000)))
+        EnsureDirectory mTmpDir
+        Say "Self-test  workdir: " & mTmpDir
+        If mHasSample Then
+            Say "Sample:            " & samplePath
+        Else
+            Say "Sample:            (none supplied -- sample tests will be skipped)"
+        End If
+        Say ""
+
+        RunTest 1, "Parse sample (invariants + re-parse consistency)", True
+        RunTest 2, "In-memory round-trip (parse -> serialize -> re-parse)", True
+        RunTest 3, "Serializer idempotence (double round-trip)", True
+        RunTest 4, "Disk round-trip (import -> export -> re-import)", True
+        RunTest 5, "Empty project round-trip", False
+        RunTest 6, "Single-file project round-trip", False
+        RunTest 7, "Flags field preserved on round-trip", False
+        RunTest 8, "Unicode names and ordinal ordering", False
+        RunTest 9, "Bad magic rejected", False
+        RunTest 10, "Truncated input rejected", False
+
+        On Error Resume Next
+        DeleteTree mTmpDir
+        On Error GoTo 0
+
+        Say ""
+        Dim summary As String
+        summary = CStr(mPassed) & "/" & CStr(mPassed + mFailed) & " tests passed"
+        If mSkipped > 0 Then
+            summary = summary & " (" & CStr(mSkipped) & " skipped -- pass a " & _
+                      ".twinproj or .twinpack path to run them)"
+        End If
+        Say summary & "."
+
+        If mFailed > 0 Then Return 1
+        Return 0
+    End Function
+
+End Module

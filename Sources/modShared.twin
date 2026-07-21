@@ -1,0 +1,266 @@
+' Copyright (c) 2026
+' License: MIT
+'
+' modShared -- platform layer: UTF-8 conversion, directory enumeration,
+' path handling, ordinal string sorting.
+
+Module modShared
+
+    Option Explicit
+    
+    Private Const INVALID_HANDLE= -1
+
+    ' ============================================================== UTF-8 ===
+
+    ' twinBASIC strings are UTF-16 BSTRs, and StrConv(vbFromUnicode) uses the
+    ' ANSI codepage rather than UTF-8, so the conversion has to go through
+    ' the codepage APIs.
+
+    Public Function Utf8Decode(ByRef b() As Byte, ByVal offset As Long, ByVal length As Long) As String
+        If length <= 0 Then Return ""
+        Dim cch As Long
+        cch = MultiByteToWideChar(CP_UTF8, 0, VarPtr(b(offset)), length, 0, 0)
+        If cch <= 0 Then
+            Err.Raise IE_ERR_BAD_UTF8, "Utf8Decode", "Invalid UTF-8 sequence in file"
+        End If
+        Dim s As String
+        s = String$(cch, vbNullChar)
+        MultiByteToWideChar CP_UTF8, 0, VarPtr(b(offset)), length, StrPtr(s), cch
+        Return s
+    End Function
+
+    Public Sub Utf8Encode(ByVal s As String, ByRef outBuf() As Byte, ByRef outLen As Long)
+        outLen = 0
+        Erase outBuf
+        If Len(s) = 0 Then Exit Sub
+        Dim cb As Long
+        cb = WideCharToMultiByte(CP_UTF8, 0, StrPtr(s), Len(s), 0, 0, 0, ByVal 0)
+        If cb <= 0 Then
+            Err.Raise IE_ERR_BAD_UTF8, "Utf8Encode", "Cannot encode string as UTF-8"
+        End If
+        ReDim outBuf(0 To cb - 1)
+        WideCharToMultiByte CP_UTF8, 0, StrPtr(s), Len(s), VarPtr(outBuf(0)), cb, 0, ByVal 0
+        outLen = cb
+    End Sub
+
+    ' ============================================================== paths ===
+
+    Public Function JoinPath(ByVal a As String, ByVal b As String) As String
+        If Len(a) = 0 Then Return b
+        If Right$(a, 1) = "\" Or Right$(a, 1) = "/" Then Return a & b
+        Return a & "\" & b
+    End Function
+
+    Public Function AbsPath(ByVal p As String) As String
+        Dim buf As String
+        Dim n As Long
+        buf = String$(32768, vbNullChar)
+        n = GetFullPathNameW(StrPtr(p), 32768, StrPtr(buf), ByVal 0)
+        If n = 0 Or n > 32768 Then Return p
+        Return Left$(buf, n)
+    End Function
+
+    ' Trailing separators are stripped first so that "C:\foo\" yields "foo".
+    Public Function BaseName(ByVal p As String) As String
+        Do While Len(p) > 1 And (Right$(p, 1) = "\" Or Right$(p, 1) = "/")
+            p = Left$(p, Len(p) - 1)
+        Loop
+        Dim i As Long
+        For i = Len(p) To 1 Step -1
+            If Mid$(p, i, 1) = "\" Or Mid$(p, i, 1) = "/" Then
+                Return Mid$(p, i + 1)
+            End If
+        Next
+        Return p
+    End Function
+
+    Public Function ParentPath(ByVal p As String) As String
+        Do While Len(p) > 1 And (Right$(p, 1) = "\" Or Right$(p, 1) = "/")
+            p = Left$(p, Len(p) - 1)
+        Loop
+        Dim i As Long
+        For i = Len(p) To 1 Step -1
+            If Mid$(p, i, 1) = "\" Or Mid$(p, i, 1) = "/" Then
+                Return Left$(p, i - 1)
+            End If
+        Next
+        Return ""
+    End Function
+
+    ' ========================================================= filesystem ===
+
+    Public Function PathExists(ByVal p As String) As Boolean
+        Return GetFileAttributesW(StrPtr(p)) <> INVALID_FILE_ATTRIBUTES
+    End Function
+
+    Public Function IsDirectory(ByVal p As String) As Boolean
+        Dim a As Long
+        a = GetFileAttributesW(StrPtr(p))
+        If a = INVALID_FILE_ATTRIBUTES Then Return False
+        Return (a And FILE_ATTRIBUTE_DIRECTORY) <> 0
+    End Function
+
+    ' os.makedirs(path, exist_ok=True)
+    Public Sub EnsureDirectory(ByVal p As String)
+        If Len(p) = 0 Then Exit Sub
+        Dim full As String
+        full = AbsPath(p)
+        If IsDirectory(full) Then Exit Sub
+        Dim parent As String
+        parent = ParentPath(full)
+        If Len(parent) > 0 And Not IsDirectory(parent) Then EnsureDirectory parent
+        If CreateDirectoryW(StrPtr(full), ByVal vbNullPtr) = 0 Then
+            If Not IsDirectory(full) Then
+                Err.Raise IE_ERR_IO, "EnsureDirectory", "Cannot create directory: " & full
+            End If
+        End If
+    End Sub
+
+    Private Function WCharBufToStr(ByRef firstChar As Integer, ByVal maxChars As Long) As String
+        Dim tmp() As Integer
+        ReDim tmp(0 To maxChars - 1)
+        CopyMemory tmp(0), firstChar, maxChars * 2
+        Dim n As Long
+        For n = 0 To maxChars - 1
+            If tmp(n) = 0 Then Exit For
+        Next
+        If n = 0 Then Return ""
+        Dim s As String
+        s = String$(n, vbNullChar)
+        CopyMemory ByVal StrPtr(s), tmp(0), n * 2
+        Return s
+    End Function
+
+    ' os.listdir(). The whole enumeration completes before returning, so
+    ' callers are free to recurse afterwards -- unlike Dir$, which cannot
+    ' have two enumerations in flight at once.
+    Public Sub ListDirectory(ByVal dirPath As String, _
+                             ByRef outNames() As String, _
+                             ByRef outIsDir() As Boolean, _
+                             ByRef outCount As Long)
+        
+        'Dim fd As IE_FIND_DATA
+        Dim fd As WIN32_FIND_DATAW
+        Dim h As LongPtr
+        Dim pattern As String
+        Dim cap As Long
+        Dim nm As String
+
+        cap = 64
+        ReDim outNames(0 To cap - 1)
+        ReDim outIsDir(0 To cap - 1)
+        outCount = 0
+
+        pattern = JoinPath(dirPath, "*")
+        h = FindFirstFileW(StrPtr(pattern), fd)
+        If h = INVALID_HANDLE Then Exit Sub
+
+        Do
+            nm = WCharBufToStr(fd.cFileName(0), MAX_PATH)
+            If nm <> "." And nm <> ".." And Len(nm) > 0 Then
+                If outCount = cap Then
+                    cap = cap * 2
+                    ReDim Preserve outNames(0 To cap - 1)
+                    ReDim Preserve outIsDir(0 To cap - 1)
+                End If
+                outNames(outCount) = nm
+                outIsDir(outCount) = ((fd.dwFileAttributes And FILE_ATTRIBUTE_DIRECTORY) <> 0)
+                outCount = outCount + 1
+            End If
+        Loop While FindNextFileW(h, fd) <> 0
+
+        FindClose h
+    End Sub
+
+    Public Sub ReadWholeFile(ByVal path As String, ByRef outBuf() As Byte, ByRef outLen As Long)
+        Dim f As Integer
+        f = FreeFile
+        Open path For Binary Access Read As #f
+        outLen = LOF(f)
+        If outLen > 0 Then
+            ReDim outBuf(0 To outLen - 1)
+            Get #f, 1, outBuf
+        Else
+            Erase outBuf
+        End If
+        Close #f
+    End Sub
+
+    ' The caller's array is written directly when it is already exactly
+    ' `length` bytes with a zero lower bound, which is the case for every
+    ' caller in this project: ByteBuffer.ToArray and Entry.GetContent both
+    ' return trimmed arrays. The copy is retained only as a fallback for an
+    ' over-allocated array, since Put would otherwise write the slack bytes
+    ' too. Skipping it takes peak memory on export from roughly 4x the file
+    ' size down to 3x.
+    Public Sub WriteWholeFile(ByVal path As String, ByRef buf() As Byte, ByVal length As Long)
+        Dim f As Integer
+        If PathExists(path) Then Kill path
+        f = FreeFile
+        Open path For Binary Access Write As #f
+        If length > 0 Then
+            If LBound(buf) = 0 And UBound(buf) = length - 1 Then
+                Put #f, 1, buf
+            Else
+                Dim tmp() As Byte
+                ReDim tmp(0 To length - 1)
+                CopyMemory tmp(0), buf(0), length
+                Put #f, 1, tmp
+            End If
+        End If
+        Close #f
+    End Sub
+
+    ' Recursive delete, used only by the self-test cleanup.
+    Public Sub DeleteTree(ByVal dirPath As String)
+        If Not IsDirectory(dirPath) Then Exit Sub
+        Dim names() As String, isDir() As Boolean, n As Long, i As Long
+        ListDirectory dirPath, names, isDir, n
+        For i = 0 To n - 1
+            If isDir(i) Then
+                DeleteTree JoinPath(dirPath, names(i))
+            Else
+                Kill JoinPath(dirPath, names(i))
+            End If
+        Next
+        RmDir dirPath
+    End Sub
+
+    ' =============================================================== sort ===
+
+    ' Ordinal (code-unit) comparison. This must NOT be a locale-aware or
+    ' case-insensitive comparison: Python's sorted() orders by code point,
+    ' and any divergence here changes the child ordering in the output file,
+    ' so exports would stop being byte-identical to the reference tool for
+    ' any project with mixed-case or non-ASCII filenames.
+    Public Function OrdinalCompare(ByVal a As String, ByVal b As String) As Long
+        Return StrComp(a, b, vbBinaryCompare)
+    End Function
+
+    ' Shell sort -- no recursion, stable enough for our purposes (names
+    ' within a directory are unique, so stability is moot), and fast enough
+    ' for directories with tens of thousands of entries.
+    Public Sub SortStrings(ByRef arr() As String, ByVal count As Long)
+        If count < 2 Then Exit Sub
+        Dim gap As Long, i As Long, j As Long
+        Dim tmp As String
+        gap = 1
+        Do While gap < count \ 3
+            gap = gap * 3 + 1
+        Loop
+        Do While gap >= 1
+            For i = gap To count - 1
+                tmp = arr(i)
+                j = i
+                Do While j >= gap
+                    If OrdinalCompare(arr(j - gap), tmp) <= 0 Then Exit Do
+                    arr(j) = arr(j - gap)
+                    j = j - gap
+                Loop
+                arr(j) = tmp
+            Next
+            gap = gap \ 3
+        Loop
+    End Sub
+
+End Module

@@ -1,0 +1,130 @@
+' Copyright (c) 2026
+' License: MIT
+'
+' modMain -- CLI entry point.
+'
+' Project type must be "Console Application" so that twinBASIC attaches a
+' real console and supplies the built-in Console class.
+
+Module modMain
+
+    Option Explicit
+
+    Private Const USAGE As String = _
+        "Usage:" & vbCrLf & _
+        "  impexp import <file.twinproj|.twinpack> [output_dir]" & vbCrLf & _
+        "  impexp export <input_dir> <output.twinproj|.twinpack>" & vbCrLf & _
+        "  impexp --self-test [file.twinproj|.twinpack]"
+
+    ' Single point of change for console output. If your twinBASIC build's
+    ' Console class exposes a different method name, change it here only.
+    Public Sub Say(ByVal s As String)
+        Console.WriteLine s
+    End Sub
+
+    ' Splits a raw command line into arguments, honouring double quotes.
+    ' Deliberately simple: no backslash escaping, which matches how the
+    ' Windows shell hands paths to a program in practice.
+    Private Sub SplitArgs(ByVal cmd As String, ByRef outArgs() As String, ByRef outCount As Long)
+        Dim cap As Long
+        cap = 16
+        ReDim outArgs(0 To cap - 1)
+        outCount = 0
+
+        Dim i As Long
+        Dim ch As String
+        Dim cur As String
+        Dim inQuote As Boolean
+        Dim have As Boolean
+
+        For i = 1 To Len(cmd)
+            ch = Mid$(cmd, i, 1)
+            If ch = """" Then
+                inQuote = Not inQuote
+                have = True
+            ElseIf (ch = " " Or ch = vbTab) And Not inQuote Then
+                If have Then
+                    If outCount = cap Then
+                        cap = cap * 2
+                        ReDim Preserve outArgs(0 To cap - 1)
+                    End If
+                    outArgs(outCount) = cur
+                    outCount = outCount + 1
+                    cur = ""
+                    have = False
+                End If
+            Else
+                cur = cur & ch
+                have = True
+            End If
+        Next
+
+        If have Then
+            If outCount = cap Then
+                cap = cap * 2
+                ReDim Preserve outArgs(0 To cap - 1)
+            End If
+            outArgs(outCount) = cur
+            outCount = outCount + 1
+        End If
+    End Sub
+
+    ' Exit codes matter for CI use. ExitProcess terminates immediately and
+    ' skips Class_Terminate, which is fine here -- nothing holds an OS
+    ' resource by the time we return.
+    Private Sub Halt(ByVal code As Long)
+        If code <> 0 Then ExitProcess code
+    End Sub
+
+    Public Sub Main()
+        Dim args() As String
+        Dim n As Long
+        Dim rc As Long
+
+        On Error GoTo Fail
+
+        SplitArgs Command$(), args, n
+        If n = 0 Then GoTo Usage
+
+        Select Case LCase$(args(0))
+
+            Case "--self-test"
+                ' The sample path is optional; without it the four
+                ' sample-driven tests are skipped and the six synthetic
+                ' ones still run.
+                If n >= 2 Then
+                    rc = RunSelfTest(args(1))
+                Else
+                    rc = RunSelfTest("")
+                End If
+                Halt rc
+
+            Case "import"
+                If n < 2 Then GoTo Usage
+                If n >= 3 Then
+                    DoImport args(1), args(2), False
+                Else
+                    DoImport args(1), "", False
+                End If
+
+            Case "export"
+                If n < 3 Then GoTo Usage
+                DoExport args(1), args(2), False
+
+            Case Else
+                GoTo Usage
+
+        End Select
+        Exit Sub
+
+Usage:
+        Say USAGE
+        Halt 1
+        Exit Sub
+
+Fail:
+        Say "error: " & Err.Description
+        Halt 1
+    End Sub
+
+End Module

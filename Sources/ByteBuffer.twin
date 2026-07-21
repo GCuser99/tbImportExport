@@ -1,0 +1,83 @@
+' Copyright (c) 2026
+' Copyright (c) 2026
+' License: MIT
+'
+' ByteBuffer -- append-only byte sink with capacity doubling.
+'
+' This replaces Python's `chunks.append(...)` + `b''.join(chunks)` idiom.
+' A naive ReDim Preserve on every write would be O(n^2); doubling keeps it
+' amortised O(n).
+
+Private Class ByteBuffer
+
+    Option Explicit
+
+    Private Const INITIAL_CAPACITY As Long = 65536
+
+    Private m() As Byte
+    Private mLen As Long
+    Private mCap As Long
+
+    Private Sub Class_Initialize()
+        mCap = INITIAL_CAPACITY
+        ReDim m(0 To mCap - 1)
+        mLen = 0
+    End Sub
+
+    Public Property Get Length() As Long
+        Return mLen
+    End Property
+
+    Private Sub EnsureRoom(ByVal extra As Long)
+        If mLen + extra <= mCap Then Exit Sub
+        Do While mCap < mLen + extra
+            mCap = mCap * 2
+        Loop
+        ReDim Preserve m(0 To mCap - 1)
+    End Sub
+
+    Public Sub PutByte(ByVal v As Byte)
+        EnsureRoom 1
+        m(mLen) = v
+        mLen = mLen + 1
+    End Sub
+
+    Public Sub PutInt16(ByVal v As Integer)
+        EnsureRoom 2
+        CopyMemory m(mLen), v, 2
+        mLen = mLen + 2
+    End Sub
+
+    Public Sub PutLong(ByVal v As Long)
+        EnsureRoom 4
+        CopyMemory m(mLen), v, 4
+        mLen = mLen + 4
+    End Sub
+
+    Public Sub PutLongLong(ByVal v As LongLong)
+        EnsureRoom 8
+        CopyMemory m(mLen), v, 8
+        mLen = mLen + 8
+    End Sub
+
+    Public Sub PutBytes(ByRef b() As Byte, ByVal count As Long)
+        If count <= 0 Then Exit Sub
+        EnsureRoom count
+        CopyMemory m(mLen), b(0), count
+        mLen = mLen + count
+    End Sub
+
+    ' Trimmed copy of the written bytes. Always at least one element;
+    ' pair with Length.
+    Public Function ToArray() As Byte()
+        Dim out() As Byte
+        If mLen > 0 Then
+            ReDim out(0 To mLen - 1)
+            CopyMemory out(0), m(0), mLen
+        Else
+            ReDim out(0 To 0)
+        End If
+        Return out
+    End Function
+
+End Class

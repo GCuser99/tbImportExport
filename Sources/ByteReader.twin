@@ -1,0 +1,103 @@
+' Copyright (c) 2026
+' License: MIT
+'
+' ByteReader -- little-endian cursor over a byte array.
+'
+' Equivalent to the `pos = [0]` closure in the Python parser, but as an
+' object so the parser is reentrant and bounds-checked.
+
+Private Class ByteReader
+
+    Option Explicit
+
+    Private m() As Byte
+    Private mLen As Long
+    Private mPos As Long
+    Private mErrorText As String
+
+    ' Errors raised from inside a class cross a COM vtable boundary on the
+    ' way out, and the description does not survive the trip -- callers see
+    ' a bare "Automation error". The text is stashed here so the module-level
+    ' caller can re-raise it with the message intact.
+    Public Property Get ErrorText() As String
+        Return mErrorText
+    End Property
+
+    Public Sub Init(ByRef buf() As Byte, ByVal length As Long)
+        m = buf
+        mLen = length
+        mPos = 0
+        mErrorText = ""
+    End Sub
+
+    Public Property Get Position() As Long
+        Return mPos
+    End Property
+
+    Private Sub Need(ByVal count As Long)
+        If count < 0 Or mPos + count > mLen Then
+            mErrorText = "Truncated file: wanted " & CStr(count) & _
+                         " bytes at offset " & CStr(mPos) & _
+                         " but only " & CStr(mLen - mPos) & " remain"
+            Err.Raise IE_ERR_TRUNCATED, "ByteReader", mErrorText
+        End If
+    End Sub
+
+    Public Function ReadByte() As Byte
+        Need 1
+        ReadByte = m(mPos)
+        mPos = mPos + 1
+    End Function
+
+    Public Function ReadInt16() As Integer
+        Dim v As Integer
+        Need 2
+        CopyMemory v, m(mPos), 2
+        mPos = mPos + 2
+        Return v
+    End Function
+
+    Public Function ReadLong() As Long
+        Dim v As Long
+        Need 4
+        CopyMemory v, m(mPos), 4
+        mPos = mPos + 4
+        Return v
+    End Function
+
+    Public Function ReadLongLong() As LongLong
+        Dim v As LongLong
+        Need 8
+        CopyMemory v, m(mPos), 8
+        mPos = mPos + 8
+        Return v
+    End Function
+
+    ' u32 length prefix + UTF-8 payload
+    Public Function ReadString() As String
+        Dim n As Long
+        n = ReadLong()
+        If n = 0 Then Return ""
+        Need n
+        Dim s As String
+        s = Utf8Decode(m, mPos, n)
+        mPos = mPos + n
+        Return s
+    End Function
+
+    ' u32 length prefix + raw payload
+    Public Sub ReadBlob(ByRef outBuf() As Byte, ByRef outLen As Long)
+        Dim n As Long
+        n = ReadLong()
+        outLen = n
+        If n = 0 Then
+            Erase outBuf
+            Exit Sub
+        End If
+        Need n
+        ReDim outBuf(0 To n - 1)
+        CopyMemory outBuf(0), m(mPos), n
+        mPos = mPos + n
+    End Sub
+
+End Class
