@@ -12,19 +12,6 @@ documented at <https://docs.twinbasic.com/Features/Packages/Import-Export-Tool>.
 5. Cd to Build location.
 6. Follow examples in [Usage section](https://github.com/GCuser99/tbImportExport/blob/main/README.md#usage).
 
-## Project Files
-
-| File | Contents |
-|---|---|
-| `Entry.twin` | Tree node. Arrays are private with accessors. |
-| `ByteBuffer.twin` | Append-only output buffer with capacity doubling. |
-| `ByteReader.twin` | Bounds-checked little-endian cursor. |
-| `modWin32.twin` | Win32 Declares (optional if reference to WinDevLib) |
-| `modShared.twin` | UTF-8, path/filesystem helpers, ordinal sort. |
-| `modImpExp.twin` | Parser, serializer, import, export. |
-| `modSelfTest.twin` | Test suite. |
-| `modMain.twin` | CLI, argument splitting, `Say`. |
-
 ## Usage
 
 Use `import` flag to unpack a .twinproj or .twinpack file into a text file directory tree. Conversely, use `export` to pack an unpacked directory tree into a .twinproj or .twinpack file.
@@ -64,6 +51,19 @@ The sample tests assert **invariants** — non-empty root name, root is a direct
 It proves the port is self-consistent: parse, serialize, and disk round-trips all agree, and the output matches the round-trip behaviour the docs specify (directories before files, alphabetical within each group, revision `0x0000` for directories and `0x0002` for files, flags and revision-trailer entries zeroed).
 
 It does **not** prove the IDE accepts the output. Before trusting this on real work: import a project, export it back, and open the result in twinBASIC. The IDE regenerates the reset metadata on open, so a round-tripped file should load and build — but your build of the IDE is the only authority on that.
+
+## Project Files
+
+| File | Contents |
+|---|---|
+| `Entry.twin` | Tree node. Arrays are private with accessors. |
+| `ByteBuffer.twin` | Append-only output buffer with capacity doubling. |
+| `ByteReader.twin` | Bounds-checked little-endian cursor. |
+| `modWin32.twin` | Win32 Declares (optional if reference to WinDevLib) |
+| `modShared.twin` | UTF-8, path/filesystem helpers, ordinal sort. |
+| `modImpExp.twin` | Parser, serializer, import, export. |
+| `modSelfTest.twin` | Test suite. |
+| `modMain.twin` | CLI, argument splitting, `Say`. |
 
 ## Limitations
 
