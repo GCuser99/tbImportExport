@@ -36,15 +36,9 @@ impexp --self-test [file.twinproj|.twinpack]
 
 ### Self-test
 
-The sample path is **optional**. Supply one and all ten tests run; omit it and the four
-sample-driven tests are skipped and the six synthetic ones still run. A path that is
-supplied but doesn't exist is treated as an error, since that's almost certainly a typo.
+The sample path is **optional**. Supply one and all ten tests run; omit it and the four sample-driven tests are skipped and the six synthetic ones still run. A path that is supplied but doesn't exist is treated as an error, since that's almost certainly a typo.
 
-Any `.twinproj` or `.twinpack` works — just save a new project from the IDE. Note that
-the Python original hardcodes a path to `indexer/sample.twinpack` in twinBASIC's own
-development repository and exits 1 when it's missing, which is always: that fixture
-isn't part of the published single-file download. Its documented `--self-test`
-invocation therefore can't succeed as shipped.
+Any `.twinproj` or `.twinpack` works — just save a new project from the IDE. Note that the Python original hardcodes a path to `indexer/sample.twinpack` in twinBASIC's own development repository and exits 1 when it's missing, which is always: that fixture isn't part of the published single-file download. Its documented `--self-test` invocation therefore can't succeed as shipped.
 
 Expected output:
 
@@ -63,21 +57,13 @@ Expected output:
   10/10 tests passed.
 ```
 
-The sample tests assert **invariants** — non-empty root name, root is a directory,
-file and directory counts stable across a re-parse — rather than constants tied to one
-particular fixture. The observed shape is reported as `[INFO]`, not asserted.
+The sample tests assert **invariants** — non-empty root name, root is a directory, file and directory counts stable across a re-parse — rather than constants tied to one particular fixture. The observed shape is reported as `[INFO]`, not asserted.
 
 ### What the self-test does and doesn't prove
 
-It proves the port is self-consistent: parse, serialize, and disk round-trips all agree,
-and the output matches the round-trip behaviour the docs specify (directories before
-files, alphabetical within each group, revision `0x0000` for directories and `0x0002`
-for files, flags and revision-trailer entries zeroed).
+It proves the port is self-consistent: parse, serialize, and disk round-trips all agree, and the output matches the round-trip behaviour the docs specify (directories before files, alphabetical within each group, revision `0x0000` for directories and `0x0002` for files, flags and revision-trailer entries zeroed).
 
-It does **not** prove the IDE accepts the output. Nothing in-process can check that.
-Before trusting this on real work: import a project, export it back, and open the result
-in twinBASIC. The IDE regenerates the reset metadata on open, so a round-tripped file
-should load and build — but your build of the IDE is the only authority on that.
+It does **not** prove the IDE accepts the output. Before trusting this on real work: import a project, export it back, and open the result in twinBASIC. The IDE regenerates the reset metadata on open, so a round-tripped file should load and build — but your build of the IDE is the only authority on that.
 
 ## Limitations
 
