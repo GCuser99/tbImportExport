@@ -25,7 +25,7 @@ impexp --self-test [file.twinproj|.twinpack]
 
 The sample path is **optional**. Supply one and all ten tests run; omit it and the four sample-driven tests are skipped and the six synthetic ones still run. A path that is supplied but doesn't exist is treated as an error, since that's almost certainly a typo.
 
-Any `.twinproj` or `.twinpack` works — just save a new project from the IDE. Note that the Python original hardcodes a path to `indexer/sample.twinpack` in twinBASIC's own development repository and exits 1 when it's missing, which is always: that fixture isn't part of the published single-file download. Its documented `--self-test` invocation therefore can't succeed as shipped.
+Any `.twinproj` or `.twinpack` works — just save a new project from the IDE and rub the self-test.
 
 Expected output:
 
