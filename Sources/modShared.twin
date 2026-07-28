@@ -9,6 +9,7 @@ Module modShared
     Option Explicit
     
     Private Const INVALID_HANDLE= -1
+    Private Const IE_LONGPATH_THRESHOLD As Long = 248
 
     ' ============================================================== UTF-8 ===
 
@@ -90,16 +91,16 @@ Module modShared
     ' ========================================================= filesystem ===
 
     Public Function PathExists(ByVal p As String) As Boolean
-        Return GetFileAttributesW(StrPtr(p)) <> INVALID_FILE_ATTRIBUTES
+        Return GetFileAttributesW(StrPtr(ApiPath(p))) <> INVALID_FILE_ATTRIBUTES
     End Function
 
     Public Function IsDirectory(ByVal p As String) As Boolean
         Dim a As Long
-        a = GetFileAttributesW(StrPtr(p))
+        a = GetFileAttributesW(StrPtr(ApiPath(p)))
         If a = INVALID_FILE_ATTRIBUTES Then Return False
         Return (a And FILE_ATTRIBUTE_DIRECTORY) <> 0
     End Function
-
+    
     ' os.makedirs(path, exist_ok=True)
     Public Sub EnsureDirectory(ByVal p As String)
         If Len(p) = 0 Then Exit Sub
@@ -109,7 +110,7 @@ Module modShared
         Dim parent As String
         parent = ParentPath(full)
         If Len(parent) > 0 And Not IsDirectory(parent) Then EnsureDirectory parent
-        If CreateDirectoryW(StrPtr(full), ByVal vbNullPtr) = 0 Then
+        If CreateDirectoryW(StrPtr(ApiPath(full)), ByVal vbNullPtr) = 0 Then
             If Not IsDirectory(full) Then
                 Err.Raise IE_ERR_IO, "EnsureDirectory", "Cannot create directory: " & full
             End If
@@ -151,7 +152,7 @@ Module modShared
         ReDim outIsDir(0 To cap - 1)
         outCount = 0
 
-        pattern = JoinPath(dirPath, "*")
+        pattern = ApiPath(JoinPath(dirPath, "*"))
         h = FindFirstFileW(StrPtr(pattern), fd)
         If h = INVALID_HANDLE Then Exit Sub
 
@@ -225,6 +226,30 @@ Module modShared
         Next
         RmDir dirPath
     End Sub
+    
+
+    ' Prefixes a path for a raw Win32 W-API call ONLY when it exceeds the
+    ' legacy limit, so short paths keep normal semantics. \\?\ disables the
+    ' "." / ".." collapse and forward-slash acceptance that GetFullPathNameW
+    ' performs, so the input MUST already be absolute and canonical -- this
+    ' may only ever wrap AbsPath output, never a raw caller string. The CLI
+    ' resolves both arguments through AbsPath at the boundary, which is what
+    ' makes that guarantee hold.
+    '
+    ' 248, not 260: directory creation (CreateDirectoryW) needs MAX_PATH
+    ' minus 12 for a possible 8.3 name, and one threshold everywhere keeps
+    ' the rule simple.
+    Public Function ApiPath(ByVal canonicalAbsPath As String) As String
+        If Len(canonicalAbsPath) < IE_LONGPATH_THRESHOLD Then
+            Return canonicalAbsPath
+        End If
+        ' UNC (\\server\share) becomes \\?\UNC\server\share; the two leading
+        ' backslashes are replaced by the UNC form, not kept.
+        If Left$(canonicalAbsPath, 2) = "\\" Then
+            Return "\\?\UNC\" & Mid$(canonicalAbsPath, 3)
+        End If
+        Return "\\?\" & canonicalAbsPath
+    End Function
 
     ' =============================================================== sort ===
 

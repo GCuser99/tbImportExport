@@ -80,48 +80,45 @@ Module modMain
         Dim args() As String
         Dim n As Long
         Dim rc As Long
-
         On Error GoTo Fail
-
         SplitArgs Command$(), args, n
         If n = 0 Then GoTo Usage
-
         Select Case LCase$(args(0))
 
             Case "--self-test"
                 ' The sample path is optional; without it the four
                 ' sample-driven tests are skipped and the six synthetic
-                ' ones still run.
+                ' ones still run. Resolve it when present, matching the
+                ' import/export boundary handling.
                 If n >= 2 Then
-                    rc = RunSelfTest(args(1))
+                    rc = RunSelfTest(AbsPath(args(1)))
                 Else
                     rc = RunSelfTest("")
                 End If
                 Halt rc
-
             Case "import"
+                ' Resolve arguments to absolute, canonical paths at the
+                ' boundary so everything downstream deals only in absolute
+                ' paths. The empty output-dir case stays empty: DoImport
+                ' reads "" as "derive the folder name from the archive root",
+                ' and AbsPath("") would wrongly turn that into the CWD.
                 If n < 2 Then GoTo Usage
                 If n >= 3 Then
-                    DoImport args(1), args(2), False
+                    DoImport AbsPath(args(1)), AbsPath(args(2)), False
                 Else
-                    DoImport args(1), "", False
+                    DoImport AbsPath(args(1)), "", False
                 End If
-
             Case "export"
                 If n < 3 Then GoTo Usage
-                DoExport args(1), args(2), False
-
+                DoExport AbsPath(args(1)), AbsPath(args(2)), False
             Case Else
                 GoTo Usage
-
         End Select
         Exit Sub
-
 Usage:
         Say USAGE
         Halt 1
         Exit Sub
-
 Fail:
         Say "error: " & Err.Description
         Halt 1

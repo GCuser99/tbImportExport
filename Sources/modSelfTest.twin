@@ -408,6 +408,65 @@ Caught:
                  " source=""" & Err.Source & """ desc=""" & Err.Description & """"
         End If
     End Sub
+    
+    ' Builds a real on-disk tree whose deepest file path exceeds the legacy
+    ' 260-char limit, exports it, and re-imports it. Self-validating: the
+    ' fixture cannot even be created unless the long-path code works, and a
+    ' capped chokepoint anywhere raises rather than silently truncating.
+    '
+    ' Uses the disk, so it is grouped with the sample tests' need for a temp
+    ' dir -- but needs no sample, so it runs unconditionally.
+    Private Sub T_LongPath()
+        ' A chain of 40-char directory segments. Six levels puts the leaf
+        ' file comfortably past 260 even from a short temp root.
+        Dim seg As String
+        seg = String$(40, "a")
+
+        Dim deep As String
+        deep = JoinPath(mTmpDir, "longpath")
+        Dim i As Long
+        For i = 1 To 6
+            deep = JoinPath(deep, seg)
+        Next
+        EnsureDirectory deep
+
+        ' Sanity: confirm we actually crossed the boundary, so a future
+        ' change to the segment math can't quietly make this a short-path
+        ' test that always passes.
+        Dim leaf As String
+        leaf = JoinPath(deep, "payload.twin")
+        AssertTrue Len(leaf) > 260, _
+                   "fixture path only " & CStr(Len(leaf)) & " chars -- not testing long paths"
+
+        Dim body() As Byte, bodyLen As Long
+        Utf8Encode "deep content", body, bodyLen
+        WriteWholeFile leaf, body, bodyLen
+
+        ' Export the top of the deep tree, then re-import it elsewhere.
+        Dim srcRoot As String, packFile As String, dstRoot As String
+        srcRoot = JoinPath(mTmpDir, "longpath")
+        packFile = JoinPath(mTmpDir, "longpath.bin")
+        dstRoot = JoinPath(mTmpDir, "longpath-out")
+
+        DoExport srcRoot, packFile, True
+        DoImport packFile, dstRoot, True
+
+        ' Walk down the re-imported copy to the same leaf and check bytes.
+        Dim reLeaf As String
+        reLeaf = dstRoot
+        For i = 1 To 6
+            reLeaf = JoinPath(reLeaf, seg)
+        Next
+        reLeaf = JoinPath(reLeaf, "payload.twin")
+
+        AssertTrue PathExists(reLeaf), "re-imported leaf missing: " & reLeaf
+
+        Dim got() As Byte, gotLen As Long
+        ReadWholeFile reLeaf, got, gotLen
+        If Not BytesEqual(body, bodyLen, got, gotLen) Then
+            Fail "long-path content mismatch"
+        End If
+    End Sub
 
     ' ------------------------------------------------------------- runner
 
@@ -430,6 +489,7 @@ Caught:
             Case 8:  T_UnicodeAndOrdering
             Case 9:  T_BadMagicRejected
             Case 10: T_TruncationRejected
+            Case 11: T_LongPath
         End Select
         Say "  [PASS] " & name
         mPassed = mPassed + 1
@@ -479,7 +539,8 @@ Failed:
         RunTest 8, "Unicode names and ordinal ordering", False
         RunTest 9, "Bad magic rejected", False
         RunTest 10, "Truncated input rejected", False
-
+        RunTest 11, "Long path (>260 chars) round-trip", False
+        
         On Error Resume Next
         DeleteTree mTmpDir
         On Error GoTo 0

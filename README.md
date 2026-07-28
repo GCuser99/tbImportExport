@@ -41,7 +41,8 @@ Expected output:
   [PASS] Unicode names and ordinal ordering
   [PASS] Bad magic rejected
   [PASS] Truncated input rejected
-  10/10 tests passed.
+  [PASS] Long path (>260 chars) round-trip
+  11/11 tests passed.
 ```
 
 The sample tests assert **invariants** — non-empty root name, root is a directory, file and directory counts stable across a re-parse — rather than constants tied to one particular fixture. The observed shape is reported as `[INFO]`, not asserted.
@@ -67,6 +68,5 @@ It does **not** prove the IDE accepts the output. Before trusting this on real w
 
 ## Limitations
 
-- **No long path support.** Anything beyond ~260 characters fails.
 - **Reparse points / symlinks** are followed like ordinary directories during export, same as the Python version.
 - **The `revisions` array** is preserved on round-trip but never populated on export, matching the reference tool.
