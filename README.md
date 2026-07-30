@@ -66,7 +66,6 @@ It does **not** prove the IDE accepts the output. Before trusting this on real w
 | `modSelfTest.twin` | Test suite. |
 | `modMain.twin` | CLI, argument splitting, `Say`. |
 
-## Limitations
+## License
 
-- **Reparse points / symlinks** are followed like ordinary directories during export, same as the Python version.
-- **The `revisions` array** is preserved on round-trip but never populated on export, matching the reference tool.
+MIT © 2026 GCuser99
