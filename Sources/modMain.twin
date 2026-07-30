@@ -84,7 +84,6 @@ Module modMain
         SplitArgs Command$(), args, n
         If n = 0 Then GoTo Usage
         Select Case LCase$(args(0))
-
             Case "--self-test"
                 ' The sample path is optional; without it the four
                 ' sample-driven tests are skipped and the six synthetic
@@ -96,7 +95,7 @@ Module modMain
                     rc = RunSelfTest("")
                 End If
                 Halt rc
-            Case "import"
+            Case "import", "unpack"
                 ' Resolve arguments to absolute, canonical paths at the
                 ' boundary so everything downstream deals only in absolute
                 ' paths. The empty output-dir case stays empty: DoImport
@@ -108,7 +107,7 @@ Module modMain
                 Else
                     DoImport AbsPath(args(1)), "", False
                 End If
-            Case "export"
+            Case "export", "pack"
                 If n < 3 Then GoTo Usage
                 DoExport AbsPath(args(1)), AbsPath(args(2)), False
             Case Else
