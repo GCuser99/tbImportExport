@@ -19,7 +19,13 @@ Module modMain
     ' Single point of change for console output. If your twinBASIC build's
     ' Console class exposes a different method name, change it here only.
     Public Sub Say(ByVal s As String)
-        Console.WriteLine s
+        On Error Resume Next
+        Dim b() As Byte, n As Long
+        Utf8Encode s & vbCrLf, b, n          ' reuse the existing UTF-8 encoder
+        If n = 0 Then Exit Sub
+        Dim h As LongPtr, written As Long
+        h = GetStdHandle(STD_OUTPUT_HANDLE)
+        WriteFile h, b(0), n, written, ByVal vbNullPtr
     End Sub
 
     ' Splits a raw command line into arguments, honouring double quotes.

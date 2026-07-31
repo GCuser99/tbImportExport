@@ -131,7 +131,20 @@ Private Module modWin32
     Public Declare PtrSafe Function WriteConsoleW Lib "kernel32" (ByVal hConsoleOutput As LongPtr, ByVal lpBuffer As LongPtr, ByVal nNumberOfCharsToWrite As Long, ByRef lpNumberOfCharsWritten As Long, ByVal lpReserved As LongPtr) As BOOL
     Public Declare PtrSafe Function ReadConsoleW Lib "kernel32" (ByVal hConsoleInput As LongPtr, ByVal lpBuffer As LongPtr, ByVal nNumberOfCharsToRead As Long, ByRef lpNumberOfCharsRead As Long, pInputControl As CONSOLE_READCONSOLE_CONTROL) As BOOL
     Public DeclareWide PtrSafe Function SysAllocStringLen Lib "oleaut32" (ByVal Value As String, ByVal Length As Long) As String
-
+    Public Declare PtrSafe Function WriteFile Lib "kernel32" (ByVal hFile As LongPtr, lpBuffer As Any, ByVal nNumberOfBytesToWrite As Long, lpNumberOfBytesWritten As Long, lpOverlapped As OVERLAPPED) As BOOL
+    
+    Public Type OVERLAPPED
+        Internal As LongPtr
+        InternalHigh As LongPtr
+        #If Win64 Then
+        OffsetsOrPtr As LongLong
+        #Else
+        OffsetOrPtr As Long
+        OffsetHigh As Long
+        #End If
+        hEvent As LongPtr
+    End Type
+    
     Public Type COORD
         x As Integer
         y As Integer

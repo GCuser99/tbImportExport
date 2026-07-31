@@ -83,6 +83,21 @@ Private Module modImpExp
             Case Else:                     Return IE_CATEGORY_DEFAULT
         End Select
     End Function
+    
+    ' The well-known category folder names, as a delimited list. This MUST
+    ' stay in sync with the Case labels in CategoryFor above -- they are the
+    ' same set. "References" is excluded here for the same reason it is
+    ' excluded there: it is never serialized.
+    '
+    ' Used only by the informational missing-folder note in DoExport. It does
+    ' NOT drive packing: absent folders stay absent in the output, because a
+    ' packer faithfully mirrors the disk and the IDE reconstructs whatever
+    ' expected folders are missing when it opens the result. The note exists
+    ' so the operator can SEE which expected folders weren't on disk, not so
+    ' the tool can invent them.
+    Private Function WellKnownCategoryNames() As String
+        Return "Resources|Sources|Settings|ImportedTypeLibraries|Miscellaneous|Packages"
+    End Function
 
     ' ============================================ parser (binary -> tree) ===
 
@@ -311,12 +326,60 @@ Propagate:
             CountEntry root.Children.Item(i), res
         Next
 
+        Dim missing As String
+        missing = FindMissingCategoryFolders(root)
+
         If Not quiet Then
             Say "Exported """ & root.Name & """ -> " & outputPath & "  (" & _
                 CStr(length) & " bytes, " & CStr(res.FileCount) & " files, " & _
                 CStr(res.DirCount) & " directories)"
+            If Len(missing) > 0 Then
+                ' Informational only -- not a warning, not an error. These
+                ' folders were not on disk at pack time (commonly because they
+                ' were empty and dropped by a version-control round trip). The
+                ' IDE recreates the ones it needs on open; nothing is wrong
+                ' with the packed file.
+                Say "  note: expected folders not present on disk: " & missing & "."
+                Say "  twinBASIC should rebuild then on Open."""
+            End If
         End If
         Return res
+    End Function
+
+    ' Returns a comma-separated list of well-known category folder names that
+    ' are absent from the top level of the tree, or "" if all are present.
+    ' Top level only: these folders live directly under the project root, and
+    ' a like-named folder nested elsewhere is not the category folder.
+    Private Function FindMissingCategoryFolders(ByVal root As Entry) As String
+        Dim known() As String
+        known = Split(WellKnownCategoryNames(), "|")
+
+        Dim result As String
+        result = ""
+
+        Dim k As Long
+        For k = LBound(known) To UBound(known)
+            If Not HasTopLevelChildDir(root, known(k)) Then
+                If Len(result) > 0 Then result = result & ", "
+                result = result & known(k)
+            End If
+        Next
+        Return result
+    End Function
+
+    Private Function HasTopLevelChildDir(ByVal root As Entry, ByVal name As String) As Boolean
+        Dim i As Long
+        For i = 1 To root.Children.Count
+            Dim c As Entry
+            Set c = root.Children.Item(i)
+            If c.Kind = ekDirectory Then
+                ' Ordinal, case-sensitive match -- the same comparison the
+                ' rest of the tool uses, so "sources" is not treated as
+                ' "Sources".
+                If OrdinalCompare(c.Name, name) = 0 Then Return True
+            End If
+        Next
+        Return False
     End Function
 
     Private Sub CountEntry(ByVal e As Entry, ByRef res As IE_RESULT)
