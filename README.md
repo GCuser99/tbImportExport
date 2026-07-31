@@ -23,9 +23,9 @@ impexp --self-test [file.twinproj|.twinpack]
 
 ### Self-test
 
-The sample path is **optional**. Supply one and all ten tests run; omit it and the four sample-driven tests are skipped and the six synthetic ones still run. A path that is supplied but doesn't exist is treated as an error, since that's almost certainly a typo.
+The sample path is **optional**. Supply one and all eleven tests run; omit it and the four sample-driven tests are skipped and the seven synthetic ones still run. A path that is supplied but doesn't exist is treated as an error, since that's almost certainly a typo.
 
-Any `.twinproj` or `.twinpack` works — just save a new project from the IDE and rub the self-test.
+Any `.twinproj` or `.twinpack` works — just save a new project from the IDE and run the self-test.
 
 Expected output:
 
@@ -52,6 +52,16 @@ The sample tests assert **invariants** — non-empty root name, root is a direct
 It proves the port is self-consistent: parse, serialize, and disk round-trips all agree, and the output matches the round-trip behaviour the docs specify (directories before files, alphabetical within each group, revision `0x0000` for directories and `0x0002` for files, flags and revision-trailer entries zeroed).
 
 It does **not** prove the IDE accepts the output. Before trusting this on real work: import a project, export it back, and open the result in twinBASIC. The IDE regenerates the reset metadata on open, so a round-tripped file should load and build — but your build of the IDE is the only authority on that.
+
+## Round-tripping through GitHub
+
+The usual workflow is: `import` a `.twinproj` into a directory tree, commit that tree to a repository, and later `export` it back into a `.twinproj`. This works well, with one thing worth knowing.
+
+**Git does not track empty directories.** If your project contains empty folders — including empty well-known folders such as `Sources`, `Resources`, or `Settings` — they will not survive a push and pull. They exist in your local tree after `import`, but a fresh clone or pull of that repository will be missing them.
+
+This is a Git limitation, not a tool limitation, and in practice it is harmless. `export` packs exactly what is present on disk: if an empty folder was dropped by Git, it simply won't be in the resulting `.twinproj`. When you then open that file, **twinBASIC recreates the folders it expects on its own.** The round trip comes out whole because the IDE reconstructs the missing structure, not because the packed file carried it.
+
+So the practical guidance is short: don't rely on the packed `.twinproj` to preserve empty folders across a Git round trip — rely on the IDE to regenerate them when it opens the project, which it does. If you need an empty folder to survive Git for some other reason, the common convention is to place a placeholder file (such as an empty `.gitkeep`) inside it so the folder is no longer empty.
 
 ## Project Files
 
