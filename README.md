@@ -61,7 +61,7 @@ The usual workflow is: `import` a `.twinproj` into a directory tree, commit that
 
 This is a Git limitation, not a tool limitation, and in practice it is harmless. `export` packs exactly what is present on disk: if an empty folder was dropped by Git, it simply won't be in the resulting `.twinproj`. When you then open that file, **twinBASIC recreates the folders it expects on its own.** The round trip comes out whole because the IDE reconstructs the missing structure, not because the packed file carried it.
 
-So the practical guidance is short: don't rely on the packed `.twinproj` to preserve empty folders across a Git round trip — rely on the IDE to regenerate them when it opens the project, which it does. If you need an empty folder to survive Git for some other reason, the common convention is to place a placeholder file (such as an empty `.gitkeep`) inside it so the folder is no longer empty.
+So the practical guidance is short: don't rely on the packed `.twinproj` to preserve empty folders across a Git round trip — rely on the IDE to regenerate them when it opens the project, which it does.
 
 ## Project Files
 
