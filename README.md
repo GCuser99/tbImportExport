@@ -31,7 +31,7 @@ ImpExp.exe can also be run from a twinBASIC project using the `Shell` command.
 'The console window stays open (cmd /k) so you can read it - omit the /k to auto-close the command window.
 Shell "cmd.exe /k """"" & <path to ImpExp.exe> & """ export """ & <input_dir> & """ """ & <output.twinproj|.twinpack> & """""", vbNormalFocus
 
-'Direct the output to a log file
+'Redirect the output to a log file
 Shell "cmd.exe /c """"" & <path to ImpExp.exe> & """ export """ & <input_dir> & """ """ & <output.twinproj|.twinpack> & """ > """ & <log file path> & """ 2>&1""", vbNormalFocus
 ```
 ### Self-test
