@@ -22,7 +22,7 @@ impexp import <file.twinproj|.twinpack> [output_dir]
 impexp export <input_dir> <output.twinproj|.twinpack>
 impexp --self-test [file.twinproj|.twinpack]
 ```
->Note: you can interchange the argument name `export` for `pack` and `import` for `unpack` - these are synonyms that signal the same thing.
+>Note: you can interchange the argument name `export` with `pack` and `import` with `unpack` - these are synonyms that signal the same thing.
 
 ### From twinBASIC
 
