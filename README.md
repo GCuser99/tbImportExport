@@ -14,13 +14,26 @@ documented at <https://docs.twinbasic.com/Features/Packages/Import-Export-Tool>.
 
 ## Usage
 
+### Command Line
+
 Use `import` flag to unpack a .twinproj or .twinpack file into a text file directory tree. Conversely, use `export` to pack an unpacked directory tree into a .twinproj or .twinpack file.
 ```
 impexp import <file.twinproj|.twinpack> [output_dir]
 impexp export <input_dir> <output.twinproj|.twinpack>
 impexp --self-test [file.twinproj|.twinpack]
 ```
+>Note: you can interchange the argument name `export` for `pack` and `import` for `unpack` - these are synonyms that signal the same thing.
 
+### From twinBASIC
+
+ImpExp.exe can also be run from a twinBASIC project using the `Shell` command.
+```vba
+'The console window stays open (cmd /k) so you can read it - omit the /k to auto-close the command window.
+Shell "cmd.exe /k """"" & <path to ImpExp.exe> & """ export """ & <input_dir> & """ """ & <output.twinproj|.twinpack> & """""", vbNormalFocus
+
+'Direct the output to a log file
+Shell "cmd.exe /c """"" & <path to ImpExp.exe> & """ export """ & <input_dir> & """ """ & <output.twinproj|.twinpack> & """ > """ & <log file path> & """ 2>&1""", vbNormalFocus
+```
 ### Self-test
 
 The sample path is **optional**. Supply one and all eleven tests run; omit it and the four sample-driven tests are skipped and the seven synthetic ones still run. A path that is supplied but doesn't exist is treated as an error, since that's almost certainly a typo.
