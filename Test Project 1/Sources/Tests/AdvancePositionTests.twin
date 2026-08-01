@@ -1,0 +1,177 @@
+' ==========================================================================
+' AdvancePositionTests
+'
+' Verifies TextStream's Line/Column bookkeeping after AdvancePosition was
+' rewritten from a per-code-unit loop to native InStr/InStrRev scans (a 3.1x
+' speedup - see LargeFileProbe Phase B). The rewrite must be behaviourally
+' IDENTICAL; this is the regression net.
+'
+' AdvancePosition is Private, so it is exercised through the public surface:
+' Write() passes the string straight to it, and Line/Column report the outcome.
+' A fresh stream per case, because the counters accumulate.
+'
+' The cases that matter are the ones where CR/LF interact:
+'   * CRLF must count as ONE break, not two   (the subtraction in the new code)
+'   * a lone CR must count as a break          (Mac-style line endings)
+'   * LF-then-CR is TWO breaks, not a reversed CRLF
+'   * Column resets to whatever follows the LAST break, wherever that is
+'   * with no break at all, Column simply advances by Len()
+'   * counting is in UTF-16 CODE UNITS, so a surrogate pair is two columns
+'
+' Every expectation below was derived from the ORIGINAL per-unit loop, not from
+' the new implementation - otherwise the test would just be confirming itself.
+'
+' Run RunAll. Expect: 14 passed, 0 failed.
+' ==========================================================================
+
+Private Module AdvancePositionTests
+    Option Explicit
+
+    Private mPassed As Long
+    Private mFailed As Long
+
+    Public Sub RunAll()
+        mPassed = 0
+        mFailed = 0
+        Debug.Print "=== AdvancePosition regression tests ==="
+        Debug.Print "(start state for every case: Line 1, Column 1)" & vbCrLf
+
+        WriteCases
+        ReadCases
+
+        Debug.Print vbCrLf & "=== " & mPassed & " passed, " & mFailed & " failed ==="
+        If mFailed > 0 Then Debug.Print "*** AdvancePosition has REGRESSED."
+    End Sub
+
+    '======================================================================
+    ' Write path - Write() hands the string directly to AdvancePosition.
+    '======================================================================
+    Private Sub WriteCases()
+        Debug.Print "--- Write path ---"
+
+        ' --- The six core cases ---
+        CheckWrite "trailing CRLF", "a" & vbCrLf, 2, 1
+        CheckWrite "trailing lone CR", "a" & vbCr, 2, 1
+        CheckWrite "LF mid-string", "a" & vbLf & "bc", 2, 3
+        CheckWrite "two CRLFs", vbCrLf & vbCrLf, 3, 1
+        CheckWrite "LF then lone CR", vbLf & vbCr, 3, 1
+        CheckWrite "no break at all", "abc", 1, 4
+
+        ' --- Reinforcements around the same seams ---
+        CheckWrite "empty string", "", 1, 1
+        CheckWrite "bare LF", vbLf, 2, 1
+        CheckWrite "bare CR", vbCr, 2, 1
+
+        ' Mixed endings in one buffer: LF then a LONE CR (not a CRLF), then text.
+        ' The last break is the CR at position 4, so Column = (6 - 4) + 1 = 3.
+        CheckWrite "LF, lone CR, text", "ab" & vbLf & vbCr & "cd", 3, 3
+
+        ' CRLF early, lone CR at the very end: 2 breaks, Column back to 1.
+        CheckWrite "CRLF then trailing CR", "a" & vbCrLf & "b" & vbCr, 3, 1
+
+        ' Counting is per UTF-16 CODE UNIT, so one astral character (U+1F600,
+        ' a surrogate pair) advances the column by TWO. This is what the old
+        ' byte-walking loop did; the new Len()-based code must agree.
+        CheckWrite "surrogate pair = 2 cols", ChrW$(&HD83D&) & ChrW$(&HDE00&), 1, 3
+
+        ' KNOWN QUIRK, not a regression: a CRLF split across two Write calls is
+        ' counted as TWO breaks, because AdvancePosition has no memory between
+        ' calls. The OLD implementation did exactly the same. Pinned here so that
+        ' if anyone ever "fixes" it, they do so deliberately.
+        CheckWriteTwice "CRLF split across 2 writes (quirk)", vbCr, vbLf, 3, 1
+    End Sub
+
+    '======================================================================
+    ' Read path - ReadLine feeds AdvancePosition the line PLUS its terminator,
+    ' so the line counter must move even though the terminator is not returned.
+    '======================================================================
+    Private Sub ReadCases()
+        Debug.Print vbCrLf & "--- Read path ---"
+
+        ' Three lines, CRLF-terminated. After reading the first line, we should be
+        ' on line 2 at column 1 - the terminator was consumed but not returned.
+        Dim path As String
+        path = TempFile()
+        FileSystemTools.StringToTextFile "one" & vbCrLf & "two" & vbCrLf & "three", path, encUtf8
+
+        Dim ts As TextStream
+        Set ts = FileSystemTools.OpenTextFile(path, ForReading)
+        Dim got As String
+        got = ts.ReadLine()
+        Check "ReadLine 1 content", (got = "one"), "one", got
+        Check "ReadLine 1 -> Line", (ts.Line = 2), "2", CStr(ts.Line)
+        Check "ReadLine 1 -> Column", (ts.Column = 1), "1", CStr(ts.Column)
+
+        got = ts.ReadLine()
+        Check "ReadLine 2 -> Line", (ts.Line = 3), "3", CStr(ts.Line)
+
+        ' Final line has NO terminator: the line number must NOT advance, but the
+        ' column must move across the content.
+        got = ts.ReadLine()
+        Check "ReadLine 3 content", (got = "three"), "three", got
+        Check "unterminated last line -> Line", (ts.Line = 3), "3", CStr(ts.Line)
+        Check "unterminated last line -> Column", (ts.Column = 6), "6", CStr(ts.Column)
+
+        ts.Close
+        FileSystemTools.DeleteFile path, True, True
+    End Sub
+
+    '======================================================================
+    ' Harness
+    '======================================================================
+
+    ' Writes 'text' to a fresh stream and asserts the resulting Line/Column.
+    Private Sub CheckWrite(ByVal name As String, ByVal text As String, _
+                           ByVal wantLine As Long, ByVal wantCol As Long)
+        Dim path As String, ts As TextStream
+        path = TempFile()
+        Set ts = FileSystemTools.CreateTextFile(path, True, encUtf8, nlWindows)
+        ts.Write text
+        Dim gotLine As Long, gotCol As Long
+        gotLine = ts.Line
+        gotCol = ts.Column
+        ts.Close
+        FileSystemTools.DeleteFile path, True, True
+
+        Check name, (gotLine = wantLine And gotCol = wantCol), _
+              "Line " & wantLine & ", Col " & wantCol, _
+              "Line " & gotLine & ", Col " & gotCol
+    End Sub
+
+    ' Two separate Write calls - proves what happens when a break straddles them.
+    Private Sub CheckWriteTwice(ByVal name As String, ByVal a As String, ByVal b As String, _
+                                ByVal wantLine As Long, ByVal wantCol As Long)
+        Dim path As String, ts As TextStream
+        path = TempFile()
+        Set ts = FileSystemTools.CreateTextFile(path, True, encUtf8, nlWindows)
+        ts.Write a
+        ts.Write b
+        Dim gotLine As Long, gotCol As Long
+        gotLine = ts.Line
+        gotCol = ts.Column
+        ts.Close
+        FileSystemTools.DeleteFile path, True, True
+
+        Check name, (gotLine = wantLine And gotCol = wantCol), _
+              "Line " & wantLine & ", Col " & wantCol, _
+              "Line " & gotLine & ", Col " & gotCol
+    End Sub
+
+    Private Sub Check(ByVal name As String, ByVal ok As Boolean, _
+                      ByVal want As String, ByVal got As String)
+        If ok Then
+            mPassed = mPassed + 1
+            Debug.Print "  PASS  " & name
+        Else
+            mFailed = mFailed + 1
+            Debug.Print "  FAIL  " & name & "   want: " & want & "   got: " & got
+        End If
+    End Sub
+
+    Private Function TempFile() As String
+        Dim tmp As String
+        tmp = FileSystemTools.GetSpecialFolder(sfTemporaryFolder)
+        TempFile = FileSystemTools.BuildPath(tmp, FileSystemTools.GetTempName("aptest_", ".txt", tmp))
+    End Function
+
+End Module

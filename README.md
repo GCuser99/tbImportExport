@@ -36,7 +36,7 @@ Shell "cmd.exe /c """"" & <path to ImpExp.exe> & """ export """ & <input_dir> & 
 ```
 ### Self-test
 
-The sample path is **optional**. Supply one and all eleven tests run; omit it and the four sample-driven tests are skipped and the seven synthetic ones still run. A path that is supplied but doesn't exist is treated as an error, since that's almost certainly a typo.
+The sample path is **optional**. Supply one and all thirteen tests run; omit it and the four sample-driven tests are skipped and the nine synthetic ones still run. A path that is supplied but doesn't exist is treated as an error, since that's almost certainly a typo.
 
 Any `.twinproj` or `.twinpack` works — just save a new project from the IDE and run the self-test.
 
@@ -55,7 +55,9 @@ Expected output:
   [PASS] Bad magic rejected
   [PASS] Truncated input rejected
   [PASS] Long path (>260 chars) round-trip
-  11/11 tests passed.
+  [PASS] Settings guard refuses tree with no Settings
+  [PASS] Settings guard passes with Settings file present
+  13/13 tests passed.
 ```
 
 The sample tests assert **invariants** — non-empty root name, root is a directory, file and directory counts stable across a re-parse — rather than constants tied to one particular fixture. The observed shape is reported as `[INFO]`, not asserted.
@@ -70,11 +72,24 @@ It does **not** prove the IDE accepts the output. Before trusting this on real w
 
 The usual workflow is: `import` a `.twinproj` into a directory tree, commit that tree to a repository, and later `export` it back into a `.twinproj`. This works well, with one thing worth knowing.
 
-**Git does not track empty directories.** If your project contains empty folders — including empty well-known folders such as `Sources`, `Resources`, or `Settings` — they will not survive a push and pull. They exist in your local tree after `import`, but a fresh clone or pull of that repository will be missing them.
+**Git does not track empty directories.** If your project contains empty folders — such as an empty `Sources` or `Resources` — they will not survive a push and pull. They exist in your local tree after `import`, but a fresh clone or pull of that repository will be missing them.
 
-This is a Git limitation, not a tool limitation, and in practice it is harmless. `export` packs exactly what is present on disk: if an empty folder was dropped by Git, it simply won't be in the resulting `.twinproj`. When you then open that file, **twinBASIC recreates the folders it expects on its own.** The round trip comes out whole because the IDE reconstructs the missing structure, not because the packed file carried it.
+For most folders this is a Git limitation, not a tool limitation, and it is harmless. `export` packs exactly what is present on disk: if an empty folder was dropped by Git, it simply won't be in the resulting `.twinproj`. When you then open that file, **twinBASIC recreates the folders it expects on its own.** The round trip comes out whole because the IDE reconstructs the missing structure, not because the packed file carried it. So don't rely on the packed `.twinproj` to preserve empty folders across a Git round trip — rely on the IDE to regenerate them, which it does.
 
-So the practical guidance is short: don't rely on the packed `.twinproj` to preserve empty folders across a Git round trip — rely on the IDE to regenerate them when it opens the project, which it does.
+### The one exception: `Settings`
+
+`Settings` is different, and `export` treats it differently. It is not an empty scaffolding folder the IDE can regenerate from nothing — it holds the project name, references, version, and compile options. If it is missing, the IDE cannot reconstruct that content: the project opens with its source intact but its references, name, and version blanked. That is silent data loss dressed up as a successful pack.
+
+So **`export` refuses to pack a directory tree that has no top-level `Settings` entry**, rather than produce a misleadingly useless file. It stops before writing anything and reports:
+
+```
+error: Refusing to pack: no 'Settings' entry at the top level of "<dir>". The packed
+file would open without its references, project name, or version. If this is a fresh
+Git checkout, Settings may have been dropped as an empty folder -- restore it before
+packing.
+```
+
+In practice `Settings` is usually a file (a name with no extension), not a folder, so Git normally carries it fine. This refusal is mainly a guard against a tree where `Settings` genuinely went missing. If you see it after a fresh checkout, restore the `Settings` entry before packing.
 
 ## Project Files
 

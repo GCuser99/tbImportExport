@@ -1,0 +1,2319 @@
+'==========================================================================
+'  FAST SUITES  --  seconds, no fixtures, no human, no GB                  
+'==========================================================================
+
+
+' ==========================================================================
+' GeneralTests - unified test suite for the library
+'
+'   * Uses the twinBASIC "Unit Testing" package . Add it via Project -> References (Ctrl+T) ->
+'     Available Packages.
+'   * EVERY test is a self-contained Public Sub: it news its own
+'     FileSystemObject, creates its own fixtures, and cleans up after itself,
+'     so any test can be run on its own (cursor inside it, F5 / Run CodeLens)
+'     OR via the RunAllTests dispatcher.
+'   * Fixtures are written as exact bytes via fso.WriteStream and read back via
+'     fso.ReadStream, so detection/decoding is tested against known ground truth
+'     independent of the TextStream text writer; other fso methods are used
+'     where they read more naturally than raw intrinsics.
+'
+' Convention (from the Assert package):
+'   * Assert.Strict.AreEqual expected, actual   - numbers/bytes (value compare)
+'   * Assert.Exact.AreEqual  expected, actual   - strings (case-sensitive)
+'   * Assert.Exact.IsTrue / Assert.Exact.IsFalse - conditions
+' Any failing assertion stops execution at the offending line with the
+' expected/actual values shown.
+'
+' Requires the FileSystemObject, TextStream, File, Folder, Drive, Files,
+' Folders and Drives classes in the project, with the public enums reachable
+' unqualified (encUtf8, ForReading, nlWindows, FileAttribute.*, Fixed, ...).
+' ==========================================================================
+
+Private Module GeneralTests
+    Option Explicit
+
+    '======================================================================
+    ' Runner
+    '======================================================================
+    Public Sub RunAllTests()
+        ' ---- TextStream: reading (auto-detect) ----
+        TestRead_Utf8_NoBom_Ascii
+        TestRead_Utf8_Multibyte
+        TestRead_Utf8_Bom
+        TestRead_Utf16LE_Bom
+        TestRead_Utf16LE_NoBom_Heuristic
+        TestRead_Ansi_InvalidUtf8
+
+        ' ---- TextStream: reading (explicit) ----
+        TestRead_ExplicitUtf8
+
+        ' ---- TextStream: line splitting / cursor ----
+        TestReadLine_Sequence
+        TestReadAll_Remainder
+        TestRead_CharCountAndColumn
+        TestLineColumn_Streaming
+        TestSkipAndSkipLine
+        TestLineTracking_Streaming
+        TestAtEndOfStream_And_Eof
+
+        ' ---- TextStream: buffered fallback ----
+        TestFallback_Utf16BE
+        TestFallback_Utf32LE
+        TestAtEndOfLine_Buffered
+        TestAtEndOfLine_Streaming
+
+        ' ---- TextStream: writing ----
+        TestWrite_RoundTrip_Utf8
+        TestWrite_RoundTrip_Utf7bom
+        TestWrite_Bom_Present
+        TestWrite_NoBom
+        TestWrite_Newline_Unix
+        TestWrite_Newline_Windows
+        TestWrite_BlankLines
+        TestWrite_Truncates
+        TestAppend_PreservesContent
+        TestAppend_PreservesBom
+        TestAppend_Empty
+        TestAppend_NonEmpty_MatchesFileStyle
+        TestAppend_NoNewline_FallsBackToWriteModeNewline
+        TestAppend_Mixed_FallsBackToWriteModeNewline
+
+        ' ---- TextStream: properties ----
+        TestProperties_FormatAndCodePage
+        TestProperties_IsStreaming
+
+        ' ---- TextStream: error guards ----
+        TestErr_OpenMissingForReading
+        TestErr_OpenMissingForWritingNoCreate
+        TestErr_ReadFromWriteStream
+        TestErr_OperateAfterClose
+
+        ' ---- TextStream: GB18030 ----
+        TestRead_GB18030_BomStripped
+        TestAppend_GB18030_NoDuplicateBom
+        TestRead_GB18030_2ByteStraddlesChunk
+        TestRead_GB18030_4ByteStraddlesChunk
+
+        ' ---- FileSystem: paths (no disk) ----
+        Test_PathParsing
+        Test_CleanFileName
+        Test_AbsolutePaths
+        Test_AbsolutePaths_WithBase
+        Test_AbsolutePaths_WithBase_LongPath
+        Test_RelativePaths
+        Test_SpecialFolders
+
+        ' ---- FileSystem: disk ----
+        Test_Existence
+        Test_TextRoundTrip
+        Test_Newlines
+        Test_Streams
+        Test_FileCopyMoveDelete
+        Test_FolderOps
+        Test_GetFilePaths
+        Test_Rename
+        Test_TempName
+        Test_FileVersion
+        Test_CurrentDirectory
+        TestArray_MixedNewlines
+        TestString_MixedNewlines
+        Test_NormalizeTextFile
+        Test_NormalizeBinaryGuard
+        Test_NormalizeAttributes
+
+        ' ---- File / Folder / Drive object model ----
+        Test_FileObject
+        Test_FileAttributes
+        Test_FileRenameCopyMoveDelete
+        Test_FileOpenAsTextStream
+        Test_FolderObject
+        Test_FolderCollections
+        Test_FolderSize
+        Test_FolderCreateTextFile
+        Test_DriveObject
+        Test_DrivesCollection
+        
+        Test_NoMatchErrorsVsScriptingFSO
+
+        CleanupTestDir
+        Debug.Print "tbFileSysTools: all tests passed."
+    End Sub
+
+    '======================================================================
+    ' ===================  TEXTSTREAM TESTS  ===============================
+    '======================================================================
+
+    '----------------------------------------------------------------------
+    ' Reading - auto-detect
+    '----------------------------------------------------------------------
+    Public Sub TestRead_Utf8_NoBom_Ascii()
+        Dim p As String: p = TempPath("r_u8_ascii.txt")
+        Dim fso As New FileSystemObject
+        fso.WriteStream AsciiBytes("Hello world"), p
+        Dim ts As TextStream
+        Set ts = fso.OpenTextFile(p)            ' ForReading, encAutoDetect
+        Assert.Exact.AreEqual "Hello world", ts.ReadAll()
+        Assert.Strict.AreEqual encUtf8, ts.Encoding
+        ts.Close
+        fso.DeleteFile p, ignoreMissing:=True
+    End Sub
+
+    Public Sub TestRead_Utf8_Multibyte()
+        ' "Hi" + U+00E9 encoded as UTF-8 (C3 A9) -> valid UTF-8 -> "Hié"
+        Dim p As String: p = TempPath("r_u8_mb.txt")
+        Dim fso As New FileSystemObject
+        fso.WriteStream BytesOf(&H48, &H69, &HC3, &HA9), p
+        Dim ts As TextStream
+        Set ts = fso.OpenTextFile(p)
+        Assert.Exact.AreEqual "Hi" & ChrW(&HE9), ts.ReadAll()
+        Assert.Strict.AreEqual encUtf8, ts.Encoding
+        ts.Close
+        fso.DeleteFile p, ignoreMissing:=True
+    End Sub
+
+    Public Sub TestRead_Utf8_Bom()
+        Dim p As String: p = TempPath("r_u8_bom.txt")
+        Dim fso As New FileSystemObject
+        fso.WriteStream Concat(BytesOf(&HEF, &HBB, &HBF), AsciiBytes("Hi")), p
+        Dim ts As TextStream
+        Set ts = fso.OpenTextFile(p)
+        Assert.Exact.AreEqual "Hi", ts.ReadAll()        ' BOM stripped
+        Assert.Strict.AreEqual encUtf8Bom, ts.Encoding
+        ts.Close
+        fso.DeleteFile p, ignoreMissing:=True
+    End Sub
+
+    Public Sub TestRead_Utf16LE_Bom()
+        Dim p As String: p = TempPath("r_u16_bom.txt")
+        Dim fso As New FileSystemObject
+        fso.WriteStream Concat(BytesOf(&HFF, &HFE), Utf16Bytes("Hello")), p
+        Dim ts As TextStream
+        Set ts = fso.OpenTextFile(p)
+        Assert.Exact.AreEqual "Hello", ts.ReadAll()
+        Assert.Strict.AreEqual encUtf16Bom, ts.Encoding
+        ts.Close
+        fso.DeleteFile p, ignoreMissing:=True
+    End Sub
+
+    Public Sub TestRead_Utf16LE_NoBom_Heuristic()
+        ' ASCII text as UTF-16LE (no BOM) -> every other byte is 0 -> detected
+        Dim p As String: p = TempPath("r_u16_nobom.txt")
+        Dim fso As New FileSystemObject
+        fso.WriteStream Utf16Bytes("Hello world from utf16"), p
+        Dim ts As TextStream
+        Set ts = fso.OpenTextFile(p)
+        Assert.Exact.AreEqual "Hello world from utf16", ts.ReadAll()
+        Assert.Strict.AreEqual encUtf16, ts.Encoding
+        ts.Close
+        fso.DeleteFile p, ignoreMissing:=True
+    End Sub
+
+    Public Sub TestRead_Ansi_InvalidUtf8()
+        ' Lone 0xE9 is not valid UTF-8 -> falls through to ANSI
+        Dim p As String: p = TempPath("r_ansi.txt")
+        Dim fso As New FileSystemObject
+        fso.WriteStream BytesOf(&H48, &HE9, &H69), p
+        Dim ts As TextStream
+        Set ts = fso.OpenTextFile(p)
+        ' Don't pin the decoded glyph (code-page dependent); pin the detection.
+        Assert.Strict.AreEqual encSystemAnsi, ts.Encoding
+        ts.Close
+        fso.DeleteFile p, ignoreMissing:=True
+    End Sub
+
+    '----------------------------------------------------------------------
+    ' Reading - explicit format
+    '----------------------------------------------------------------------
+    Public Sub TestRead_ExplicitUtf8()
+        Dim p As String: p = TempPath("r_explicit.txt")
+        Dim fso As New FileSystemObject
+        fso.WriteStream AsciiBytes("explicit utf8"), p
+        Dim ts As TextStream
+        Set ts = fso.OpenTextFile(p, ForReading, False, encUtf8)
+        Assert.Exact.AreEqual "explicit utf8", ts.ReadAll()
+        ts.Close
+        fso.DeleteFile p, ignoreMissing:=True
+    End Sub
+
+    '----------------------------------------------------------------------
+    ' Line splitting / cursor
+    '----------------------------------------------------------------------
+    Public Sub TestReadLine_Sequence()
+        Dim p As String: p = TempPath("lines.txt")
+        Dim fso As New FileSystemObject
+        fso.WriteStream AsciiBytes("L1" & vbCrLf & "L2" & vbLf & "L3"), p
+        Dim ts As TextStream
+        Set ts = fso.OpenTextFile(p)
+        Assert.Exact.AreEqual "L1", ts.ReadLine()       ' CRLF terminator
+        Assert.Exact.AreEqual "L2", ts.ReadLine()       ' LF terminator
+        Assert.Exact.AreEqual "L3", ts.ReadLine()       ' no terminator (last line)
+        Assert.Exact.IsTrue ts.AtEndOfStream
+        ts.Close
+        fso.DeleteFile p, ignoreMissing:=True
+    End Sub
+
+    Public Sub TestReadAll_Remainder()
+        Dim p As String: p = TempPath("remainder.txt")
+        Dim fso As New FileSystemObject
+        fso.WriteStream AsciiBytes("alpha" & vbCrLf & "beta" & vbCrLf & "gamma"), p
+        Dim ts As TextStream
+        Set ts = fso.OpenTextFile(p)
+        Assert.Exact.AreEqual "alpha", ts.ReadLine()
+        Assert.Exact.AreEqual "beta" & vbCrLf & "gamma", ts.ReadAll()
+        Assert.Exact.IsTrue ts.AtEndOfStream
+        ts.Close
+        fso.DeleteFile p, ignoreMissing:=True
+    End Sub
+
+    Public Sub TestRead_CharCountAndColumn()
+        Dim p As String: p = TempPath("chars.txt")
+        Dim fso As New FileSystemObject
+        fso.WriteStream AsciiBytes("abcdef"), p
+        Dim ts As TextStream
+        Set ts = fso.OpenTextFile(p)
+        Assert.Exact.AreEqual "abc", ts.Read(3)
+        Assert.Strict.AreEqual 4&, ts.Column      ' column is 1-based, now at 'd'
+        Assert.Exact.AreEqual "def", ts.Read(10)        ' over-read clamps to remaining
+        Assert.Exact.IsTrue ts.AtEndOfStream
+        ts.Close
+        fso.DeleteFile p, ignoreMissing:=True
+    End Sub
+
+    Public Sub TestLineColumn_Streaming()
+        ' Converted from Debug.Assert to the Assert package for consistency.
+        Dim p As String: p = TempPath("linecol.txt")
+        Dim le() As Byte
+        le = Utf16Bytes("ab" & vbLf & "cd" & vbCrLf & "ef")
+        SwapPairs le                                     ' UTF-16BE body
+        Dim fso As New FileSystemObject
+        fso.WriteStream Concat(BytesOf(&HFE, &HFF), le), p
+        Dim ts As TextStream
+        Set ts = fso.OpenTextFile(p)
+        Dim i As Long
+        Do
+            i = i + 1
+            Assert.Strict.AreEqual i, ts.Line
+            Assert.Strict.AreEqual 1&, ts.Column
+            ts.ReadLine
+        Loop Until ts.AtEndOfStream
+        Assert.Strict.AreEqual i, ts.Line
+        Assert.Strict.AreEqual 3&, ts.Column
+        ts.Close
+        fso.DeleteFile p, ignoreMissing:=True
+    End Sub
+
+    Public Sub TestSkipAndSkipLine()
+        Dim p As String: p = TempPath("skip.txt")
+        Dim fso As New FileSystemObject
+        fso.WriteStream AsciiBytes("HEADER" & vbCrLf & "X12345body"), p
+        Dim ts As TextStream
+        Set ts = fso.OpenTextFile(p)
+        ts.SkipLine                              ' drop "HEADER"
+        ts.Skip 6                                ' drop "X12345"
+        Assert.Exact.AreEqual "body", ts.ReadAll()
+        ts.Close
+        fso.DeleteFile p, ignoreMissing:=True
+    End Sub
+
+    Public Sub TestLineTracking_Streaming()
+        Dim p As String: p = TempPath("track.txt")
+        Dim fso As New FileSystemObject
+        fso.WriteStream AsciiBytes("one" & vbCrLf & "two" & vbCrLf & "three"), p
+        Dim ts As TextStream
+        Set ts = fso.OpenTextFile(p)
+        Assert.Strict.AreEqual 1&, ts.Line        ' before any read
+        ts.ReadLine
+        Assert.Strict.AreEqual 2&, ts.Line
+        ts.ReadLine
+        Assert.Strict.AreEqual 3&, ts.Line
+        ts.Close
+        fso.DeleteFile p, ignoreMissing:=True
+    End Sub
+
+    Public Sub TestAtEndOfStream_And_Eof()
+        Dim p As String: p = TempPath("eos.txt")
+        Dim fso As New FileSystemObject
+        fso.WriteStream AsciiBytes("only line"), p
+        Dim ts As TextStream
+        Set ts = fso.OpenTextFile(p)
+        Assert.Exact.IsFalse ts.AtEndOfStream
+        ts.ReadAll
+        Assert.Exact.IsTrue ts.AtEndOfStream
+
+        ' Reading past end raises 62 (capture first, then assert outside Resume Next)
+        Dim e As Long, dummy As String
+        On Error Resume Next
+        dummy = ts.ReadLine()
+        e = Err.Number
+        On Error GoTo 0
+        Assert.Strict.AreEqual 62&, e
+        ts.Close
+        fso.DeleteFile p, ignoreMissing:=True
+    End Sub
+
+    '----------------------------------------------------------------------
+    ' Buffered fallback (non-streamable encodings)
+    '----------------------------------------------------------------------
+    Public Sub TestFallback_Utf16BE()
+        ' UTF-16BE with BOM (FE FF)
+        Dim p As String: p = TempPath("be.txt")
+        Dim le() As Byte
+        le = Utf16Bytes("BigEndian")
+        SwapPairs le
+        Dim fso As New FileSystemObject
+        fso.WriteStream Concat(BytesOf(&HFE, &HFF), le), p
+        Dim ts As TextStream
+        Set ts = fso.OpenTextFile(p)
+        Assert.Exact.IsTrue ts.IsStreaming
+        Assert.Exact.AreEqual "BigEndian", ts.ReadAll()
+        Assert.Strict.AreEqual encUtf16BeBom, ts.Encoding
+        ts.Close
+        fso.DeleteFile p, ignoreMissing:=True
+    End Sub
+
+    Public Sub TestFallback_Utf32LE()
+        ' "Hi" as UTF-32LE: 48 00 00 00, 69 00 00 00
+        Dim p As String: p = TempPath("u32.txt")
+        Dim fso As New FileSystemObject
+        fso.WriteStream BytesOf(&H48, 0, 0, 0, &H69, 0, 0, 0), p
+        Dim ts As TextStream
+        Set ts = fso.OpenTextFile(p)
+        Assert.Exact.IsTrue ts.IsStreaming
+        Assert.Exact.AreEqual "Hi", ts.ReadAll()
+        Assert.Strict.AreEqual encUtf32, ts.Encoding
+        ts.Close
+        fso.DeleteFile p, ignoreMissing:=True
+    End Sub
+
+    Public Sub TestAtEndOfLine_Streaming()
+        ' AtEndOfLine works in streaming mode too; UTF-16BE streams in the rewrite
+        Dim p As String: p = TempPath("aeol_s.txt")
+        Dim le() As Byte
+        le = Utf16Bytes("ab" & vbLf & "cd")
+        SwapPairs le
+        Dim fso As New FileSystemObject
+        fso.WriteStream Concat(BytesOf(&HFE, &HFF), le), p
+        Dim ts As TextStream
+        Set ts = fso.OpenTextFile(p)
+        Assert.Exact.IsTrue ts.IsStreaming
+        ts.Read 2                                 ' consume "ab"; next char is LF
+        Assert.Exact.IsTrue ts.AtEndOfLine
+        ts.Close
+        fso.DeleteFile p, ignoreMissing:=True
+    End Sub
+
+    Public Sub TestAtEndOfLine_Buffered()
+        ' Force the buffered path with an explicit fallback encoding (ASCII is
+        ' valid Big5), so AtEndOfLine reads from mBuffer rather than the stream.
+        Dim p As String: p = TempPath("aeol_buf.txt")
+        Dim fso As New FileSystemObject
+        fso.WriteStream AsciiBytes("ab" & vbLf & "cd"), p
+        Dim ts As TextStream
+        Set ts = fso.OpenTextFile(p, ForReading, , encBig5)
+        Assert.Exact.IsTrue ts.IsStreaming       ' cpBig5 -> buffered
+        ts.Read 2                                  ' consume "ab"; next char is LF
+        Assert.Exact.IsTrue ts.AtEndOfLine
+        ts.Close
+        fso.DeleteFile p, ignoreMissing:=True
+    End Sub
+
+    '----------------------------------------------------------------------
+    ' Writing
+    '----------------------------------------------------------------------
+    Public Sub TestWrite_RoundTrip_Utf8()
+        Dim p As String: p = TempPath("w_round.txt")
+        Dim fso As New FileSystemObject
+        Dim ts As TextStream
+        Set ts = fso.OpenTextFile(p, ForWriting, True, encUtf8, nlUnix)
+        ts.WriteLine "first"
+        ts.WriteLine "second"
+        ts.Close
+
+        Set ts = fso.OpenTextFile(p)
+        Assert.Exact.AreEqual "first" & vbLf & "second" & vbLf, ts.ReadAll()
+        ts.Close
+        fso.DeleteFile p, ignoreMissing:=True
+    End Sub
+
+    Public Sub TestWrite_RoundTrip_Utf7bom()
+        Dim p As String: p = TempPath("w_round7.txt")
+        Dim fso As New FileSystemObject
+        Dim ts As TextStream
+        Set ts = fso.OpenTextFile(p, ForWriting, True, encUtf7Bom, nlUnix)
+        ts.WriteLine "π ≈ 3.14159"
+        ts.WriteLine "π ≈ 3.14159"
+        ts.Close
+
+        Set ts = fso.OpenTextFile(p)
+        Assert.Exact.AreEqual "π ≈ 3.14159" & vbLf & "π ≈ 3.14159" & vbLf, ts.ReadAll()
+        ts.Close
+        fso.DeleteFile p, ignoreMissing:=True
+    End Sub
+
+    Public Sub TestWrite_Bom_Present()
+        Dim p As String: p = TempPath("w_bom.txt")
+        Dim fso As New FileSystemObject
+        Dim ts As TextStream
+        Set ts = fso.OpenTextFile(p, ForWriting, True, encUtf8Bom)
+        ts.Write "x"
+        ts.Close
+
+        Dim b() As Byte: fso.ReadStream p, b
+        Assert.Strict.AreEqual &HEF, b(0)
+        Assert.Strict.AreEqual &HBB, b(1)
+        Assert.Strict.AreEqual &HBF, b(2)
+        Assert.Strict.AreEqual Asc("x"), b(3)
+        fso.DeleteFile p, ignoreMissing:=True
+    End Sub
+
+    Public Sub TestWrite_NoBom()
+        Dim p As String: p = TempPath("w_nobom.txt")
+        Dim fso As New FileSystemObject
+        Dim ts As TextStream
+        Set ts = fso.OpenTextFile(p, ForWriting, True, encUtf8)
+        ts.Write "x"
+        ts.Close
+        Dim b() As Byte: fso.ReadStream p, b
+        Assert.Strict.AreEqual Asc("x"), b(0)   ' no leading BOM
+        fso.DeleteFile p, ignoreMissing:=True
+    End Sub
+
+    Public Sub TestWrite_Newline_Unix()
+        Dim p As String: p = TempPath("w_lf.txt")
+        Dim fso As New FileSystemObject
+        Dim ts As TextStream
+        Set ts = fso.OpenTextFile(p, ForWriting, True, encUtf8, nlUnix)
+        ts.WriteLine "a"
+        ts.WriteLine "b"
+        ts.Close
+        Dim b() As Byte: fso.ReadStream p, b      ' expect: a \n b \n
+        Assert.Strict.AreEqual 4&, SafeCount(b)
+        Assert.Strict.AreEqual Asc("a"), b(0)
+        Assert.Strict.AreEqual 10&, b(1)
+        Assert.Strict.AreEqual Asc("b"), b(2)
+        Assert.Strict.AreEqual 10&, b(3)
+        fso.DeleteFile p, ignoreMissing:=True
+    End Sub
+
+    Public Sub TestWrite_Newline_Windows()
+        Dim p As String: p = TempPath("w_crlf.txt")
+        Dim fso As New FileSystemObject
+        Dim ts As TextStream
+        Set ts = fso.OpenTextFile(p, ForWriting, True, encUtf8, nlWindows)
+        ts.WriteLine "a"
+        ts.Close
+        Dim b() As Byte: fso.ReadStream p, b      ' expect: a \r \n
+        Assert.Strict.AreEqual 3&, SafeCount(b)
+        Assert.Strict.AreEqual Asc("a"), b(0)
+        Assert.Strict.AreEqual 13&, b(1)
+        Assert.Strict.AreEqual 10&, b(2)
+        fso.DeleteFile p, ignoreMissing:=True
+    End Sub
+
+    Public Sub TestWrite_BlankLines()
+        Dim p As String: p = TempPath("w_blank.txt")
+        Dim fso As New FileSystemObject
+        Dim ts As TextStream
+        Set ts = fso.OpenTextFile(p, ForWriting, True, encUtf8, nlUnix)
+        ts.WriteBlankLines 3
+        ts.Close
+        Dim b() As Byte: fso.ReadStream p, b
+        Assert.Strict.AreEqual 3&, SafeCount(b)
+        Assert.Strict.AreEqual 10&, b(0)
+        Assert.Strict.AreEqual 10&, b(1)
+        Assert.Strict.AreEqual 10&, b(2)
+        fso.DeleteFile p, ignoreMissing:=True
+    End Sub
+
+    Public Sub TestWrite_Truncates()
+        Dim p As String: p = TempPath("w_trunc.txt")
+        Dim fso As New FileSystemObject
+        fso.WriteStream AsciiBytes("pre-existing content"), p
+        Dim ts As TextStream
+        Set ts = fso.OpenTextFile(p, ForWriting, True, encUtf8)   ' open then no writes
+        ts.Close
+        Dim b() As Byte: fso.ReadStream p, b
+        Assert.Strict.AreEqual 0&, SafeCount(b)               ' truncated to empty
+        fso.DeleteFile p, ignoreMissing:=True
+    End Sub
+
+    Public Sub TestAppend_PreservesContent()
+        Dim p As String: p = TempPath("a_content.txt")
+        Dim fso As New FileSystemObject
+        fso.WriteStream AsciiBytes("line1" & vbLf), p
+        Dim ts As TextStream
+        Set ts = fso.OpenTextFile(p, ForAppending, False, encAutoDetect)
+        ts.Write "line2"
+        ts.Close
+        Set ts = fso.OpenTextFile(p)
+        Assert.Exact.AreEqual "line1" & vbLf & "line2", ts.ReadAll()
+        ts.Close
+        fso.DeleteFile p, ignoreMissing:=True
+    End Sub
+
+    Public Sub TestAppend_PreservesBom()
+        ' Existing UTF-8 BOM file; append must NOT duplicate the BOM
+        Dim p As String: p = TempPath("a_bom.txt")
+        Dim fso As New FileSystemObject
+        fso.WriteStream Concat(BytesOf(&HEF, &HBB, &HBF), AsciiBytes("a")), p
+        Dim ts As TextStream
+        Set ts = fso.OpenTextFile(p, ForAppending)
+        ts.Write "b"
+        ts.Close
+        Dim b() As Byte: fso.ReadStream p, b       ' EF BB BF 'a' 'b' (one BOM only)
+        Assert.Strict.AreEqual 5&, SafeCount(b)
+        Assert.Strict.AreEqual CLng(&HEF), CLng(b(0))
+        Assert.Strict.AreEqual CLng(Asc("a")), CLng(b(3))
+        Assert.Strict.AreEqual CLng(Asc("b")), CLng(b(4))
+        Set ts = fso.OpenTextFile(p)
+        Assert.Exact.AreEqual "ab", ts.ReadAll()         ' BOM stripped on read
+        ts.Close
+        fso.DeleteFile p, ignoreMissing:=True
+    End Sub
+
+    Public Sub TestAppend_Empty()
+        ' Write an empty file, then append, using the line-ending argument for append
+        Dim p As String: p = TempPath("a_empty.txt")
+        Dim fso As New FileSystemObject
+        Dim ts As TextStream
+        fso.DeleteFile p, ignoreMissing:=True
+        Set ts = fso.OpenTextFile(p, ForWriting, True)
+        ts.Close
+        Assert.Exact.IsTrue fso.FileExists(p)
+        Set ts = fso.OpenTextFile(p, ForAppending, , , nlUnix)
+        ts.WriteLine("line1")
+        ts.WriteLine("line2")
+        ts.Close
+        Set ts = fso.OpenTextFile(p, ForReading)
+        Assert.Exact.AreEqual "line1" & vbLf & "line2" & vbLf, ts.ReadAll
+        ts.Close
+        fso.DeleteFile p, ignoreMissing:=True
+    End Sub
+
+    Public Sub TestAppend_NonEmpty_MatchesFileStyle()
+        ' A non-empty file dictates its own newline style; writeModeNewline is ignored.
+        ' Body is CRLF; we append with nlUnix (deliberately the "wrong" style) and expect
+        ' the appended line to come out CRLF to match the file - NOT LF.
+        Dim p As String: p = TempPath("a_match.txt")
+        Dim fso As New FileSystemObject
+        Dim ts As TextStream
+
+        fso.DeleteFile p, ignoreMissing:=True
+
+        Set ts = fso.OpenTextFile(p, ForWriting, True, , nlWindows)
+        ts.WriteLine("existing")
+        ts.Close
+
+        Set ts = fso.OpenTextFile(p, ForAppending, , , nlUnix)
+        ts.WriteLine("appended")
+        ts.Close
+
+        Set ts = fso.OpenTextFile(p, ForReading)
+        Assert.Exact.AreEqual "existing" & vbCrLf & "appended" & vbCrLf, ts.ReadAll
+        ts.Close
+        fso.DeleteFile p, ignoreMissing:=True
+    End Sub
+
+    Public Sub TestAppend_NoNewline_FallsBackToWriteModeNewline()
+        ' A file with no terminator has no style to match, so append falls back to
+        ' writeModeNewline. Seed an unterminated single line, append with nlUnix, and
+        ' expect the appended terminator to be LF (the caller's value).
+        Dim p As String: p = TempPath("a_noeol.txt")
+        Dim fso As New FileSystemObject
+        Dim ts As TextStream
+
+        fso.DeleteFile p, ignoreMissing:=True
+
+        Set ts = fso.OpenTextFile(p, ForWriting, True)
+        ts.Write("noeol")                                ' no trailing newline
+        ts.Close
+
+        Set ts = fso.OpenTextFile(p, ForAppending, , , nlUnix)
+        ts.WriteLine("appended")
+        ts.Close
+
+        ' "appended" glues straight onto "noeol" - byte-append, no injected newline.
+        Set ts = fso.OpenTextFile(p, ForReading)
+        Assert.Exact.AreEqual "noeolappended" & vbLf, ts.ReadAll
+        ts.Close
+        fso.DeleteFile p, ignoreMissing:=True
+    End Sub
+
+    Public Sub TestAppend_Mixed_FallsBackToWriteModeNewline()
+        ' An already-mixed file has no single style to match, so append also falls back
+        ' to writeModeNewline. Seed a CRLF+LF mix, append with nlMacintosh, and expect
+        ' the appended terminator to be CR.
+        Dim p As String: p = TempPath("a_mixed.txt")
+        Dim fso As New FileSystemObject
+        Dim ts As TextStream
+
+        fso.DeleteFile p, ignoreMissing:=True
+
+        Set ts = fso.OpenTextFile(p, ForWriting, True)
+        ts.Write("a" & vbCrLf & "b" & vbLf)              ' raw mixed body
+        ts.Close
+
+        Set ts = fso.OpenTextFile(p, ForAppending, , , nlMacintosh)
+        ts.WriteLine("c")
+        ts.Close
+
+        Set ts = fso.OpenTextFile(p, ForReading)
+        Assert.Exact.AreEqual "a" & vbCrLf & "b" & vbLf & "c" & vbCr, ts.ReadAll
+        ts.Close
+        fso.DeleteFile p, ignoreMissing:=True
+    End Sub
+
+    '----------------------------------------------------------------------
+    ' Properties
+    '----------------------------------------------------------------------
+    Public Sub TestProperties_FormatAndCodePage()
+        Dim p As String: p = TempPath("prop.txt")
+        Dim fso As New FileSystemObject
+        fso.WriteStream Concat(BytesOf(&HFF, &HFE), Utf16Bytes("data")), p
+        Dim ts As TextStream
+        Set ts = fso.OpenTextFile(p)
+        Assert.Strict.AreEqual encUtf16Bom, ts.Encoding
+        ts.Close
+        fso.DeleteFile p, ignoreMissing:=True
+    End Sub
+
+    Public Sub TestProperties_IsStreaming()
+        Dim p As String: p = TempPath("isstream.txt")
+        Dim fso As New FileSystemObject
+        fso.WriteStream AsciiBytes("streamed natively"), p
+        Dim ts As TextStream
+        Set ts = fso.OpenTextFile(p)              ' UTF-8 -> native streaming
+        Assert.Exact.IsTrue ts.IsStreaming
+        ts.Close
+        fso.DeleteFile p, ignoreMissing:=True
+    End Sub
+    
+    ' The buffered path writes at Close, so a CWD change between open and close used
+    ' to redirect the write. IsStreaming must be False here or the test proves nothing.
+    Public Sub Test_BufferedPath_IgnoresCwdChange()
+        Dim tmp As String, dirA As String, dirB As String
+        tmp = FileSystemTools.GetSpecialFolder(sfTemporaryFolder)
+        dirA = FileSystemTools.BuildPath(tmp, "cwdtest_a")
+        dirB = FileSystemTools.BuildPath(tmp, "cwdtest_b")
+        FileSystemTools.DeleteFolder dirA, True, True
+        FileSystemTools.DeleteFolder dirB, True, True
+        FileSystemTools.CreateFolder dirA, True
+        FileSystemTools.CreateFolder dirB, True
+
+        Dim saved As String: saved = FileSystemTools.GetCurrentDir()
+        FileSystemTools.SetCurrentDir dirA
+
+        Dim ts As TextStream
+        Set ts = FileSystemTools.CreateTextFile("out.txt", True, encUtf7, nlWindows)
+        Debug.Print "  IsStreaming = " & ts.IsStreaming & "   (must be False)"
+        ts.WriteLine "hello"
+
+        FileSystemTools.SetCurrentDir dirB      ' <-- the move that used to redirect it
+        ts.Close                                ' the ONLY disk write on this path
+
+        FileSystemTools.SetCurrentDir saved
+        Debug.Print "  in A (want True) : " & FileSystemTools.FileExists(FileSystemTools.BuildPath(dirA, "out.txt"))
+        Debug.Print "  in B (want False): " & FileSystemTools.FileExists(FileSystemTools.BuildPath(dirB, "out.txt"))
+
+        FileSystemTools.DeleteFolder dirA, True, True
+        FileSystemTools.DeleteFolder dirB, True, True
+    End Sub
+
+    '----------------------------------------------------------------------
+    ' Error guards
+    '----------------------------------------------------------------------
+    Public Sub TestErr_OpenMissingForReading()
+        Dim fso As New FileSystemObject
+        Dim ts As TextStream
+        Dim p As String: p = TempPath("does_not_exist.txt")
+        fso.DeleteFile p, ignoreMissing:=True
+        Dim e As Long
+        On Error Resume Next
+        Set ts = fso.OpenTextFile(p, ForReading)
+        e = Err.Number
+        On Error GoTo 0
+        Assert.Strict.AreEqual 53&, e
+    End Sub
+
+    Public Sub TestErr_OpenMissingForWritingNoCreate()
+        Dim fso As New FileSystemObject
+        Dim ts As TextStream
+        Dim p As String: p = TempPath("no_create.txt")
+        fso.DeleteFile p, ignoreMissing:=True
+        Dim e As Long
+        On Error Resume Next
+        Set ts = fso.OpenTextFile(p, ForWriting, False)   ' create:=False
+        e = Err.Number
+        On Error GoTo 0
+        Assert.Strict.AreEqual 53&, e
+    End Sub
+
+    Public Sub TestErr_ReadFromWriteStream()
+        Dim p As String: p = TempPath("wrongmode.txt")
+        Dim fso As New FileSystemObject
+        Dim ts As TextStream
+        Set ts = fso.OpenTextFile(p, ForWriting, True, encUtf8)
+        Dim e As Long, dummy As String
+        On Error Resume Next
+        dummy = ts.ReadLine()                     ' not open for reading
+        e = Err.Number
+        On Error GoTo 0
+        Assert.Strict.AreEqual 54&, e
+        ts.Close
+        fso.DeleteFile p, ignoreMissing:=True
+    End Sub
+
+    Public Sub TestErr_OperateAfterClose()
+        Dim p As String: p = TempPath("afterclose.txt")
+        Dim fso As New FileSystemObject
+        fso.WriteStream AsciiBytes("content"), p
+        Dim ts As TextStream
+        Set ts = fso.OpenTextFile(p)
+        ts.Close
+        Dim e As Long, dummy As String
+        On Error Resume Next
+        dummy = ts.ReadLine()                     ' closed
+        e = Err.Number
+        On Error GoTo 0
+        Assert.Strict.AreEqual 52&, e
+        fso.DeleteFile p, ignoreMissing:=True
+    End Sub
+
+    '----------------------------------------------------------------------
+    ' GB18030
+    '----------------------------------------------------------------------
+    Public Sub TestRead_GB18030_BomStripped()
+        ' GB18030 signature (84 31 95 33) + content. The BOM must be SKIPPED, not
+        ' decoded into a leading U+FEFF.
+        Dim p As String: p = TempPath("gb_bom.txt")
+        Dim bom() As Byte: bom = BytesOf(&H84, &H31, &H95, &H33)
+        Dim body() As Byte
+        body = Concat(AsciiBytes("This costs "), BytesOf(&HA2, &HE3))
+        body = Concat(body, AsciiBytes("1."))
+
+        Dim fso As New FileSystemObject
+        fso.WriteStream Concat(bom, body), p
+        Dim ts As TextStream
+        Set ts = fso.OpenTextFile(p)
+        Dim s As String: s = ts.ReadAll()
+        Assert.Strict.AreEqual encGB18030Bom, ts.Encoding
+        Assert.Exact.IsTrue ts.IsStreaming
+        Assert.Exact.AreEqual "This costs ", Left$(s, 11)    ' BOM stripped, starts at 'T'
+        Assert.Exact.AreEqual "1.", Right$(s, 2)             ' trailing ASCII survived
+        Assert.Strict.AreEqual 14&, Len(s)             ' 11 + 1 decoded char + 2
+        ts.Close
+        fso.DeleteFile p, ignoreMissing:=True
+    End Sub
+
+    Public Sub TestAppend_GB18030_NoDuplicateBom()
+        ' Appending to a BOM-bearing GB18030 file must preserve the single signature.
+        Dim p As String: p = TempPath("gb_append.txt")
+        Dim bom() As Byte: bom = BytesOf(&H84, &H31, &H95, &H33)
+        Dim fso As New FileSystemObject
+        fso.WriteStream Concat(bom, AsciiBytes("ab")), p ' BOM + "ab" = 6 bytes
+        Dim ts As TextStream
+        Set ts = fso.OpenTextFile(p, ForAppending)
+        Assert.Exact.IsTrue ts.IsStreaming
+        Assert.Strict.AreEqual encGB18030Bom, ts.Encoding
+        ts.Write "cd"
+        ts.Close
+
+        Dim raw() As Byte
+        fso.ReadStream p, raw                            ' raw file bytes
+        ' One BOM (4) + "abcd" (4) = 8 bytes; a duplicated BOM would make it 12
+        Assert.Strict.AreEqual 8&, UBound(raw) + 1
+        Assert.Strict.AreEqual &H84, raw(0)
+        Assert.Strict.AreEqual &H31, raw(1)
+        Assert.Strict.AreEqual &H95, raw(2)
+        Assert.Strict.AreEqual &H33, raw(3)
+        Assert.Strict.AreEqual &H64, raw(7)  ' last byte is 'd'
+        fso.DeleteFile p, ignoreMissing:=True
+    End Sub
+
+    Public Sub TestRead_GB18030_2ByteStraddlesChunk()
+        ' 2-byte GB18030 char (A2 E3) straddles the 64 KB boundary: A2 is the last
+        ' byte of chunk 1, E3 the first of chunk 2. Exercises the 2-byte carry.
+        Const N As Long = 65535                  ' filler so A2 lands at offset 65535
+        Dim p As String: p = TempPath("gb_split2.txt")
+        Dim body() As Byte
+        body = Concat(AsciiBytes(String$(N, "a")), BytesOf(&HA2, &HE3))
+        body = Concat(body, AsciiBytes("Z"))
+
+        Dim fso As New FileSystemObject
+        fso.WriteStream body, p
+        Dim ts As TextStream
+        Set ts = fso.OpenTextFile(p, ForReading, , encGB18030)
+        Assert.Exact.IsTrue ts.IsStreaming
+        Assert.Strict.AreEqual encGB18030, ts.Encoding
+
+        Dim s As String: s = ts.Read(100000)     ' > file length: forces multi-chunk fills
+        Assert.Strict.AreEqual N + 2, Len(s)   ' N 'a' + 1 char + 'Z'
+        Assert.Exact.AreEqual "a", Left$(s, 1)
+        Assert.Exact.AreEqual "Z", Right$(s, 1)
+        ts.Close
+        fso.DeleteFile p, ignoreMissing:=True
+    End Sub
+
+    Public Sub TestRead_GB18030_4ByteStraddlesChunk()
+        ' 4-byte GB18030 char (81 30 81 30 = U+0080) straddles the boundary: its
+        ' first 2 bytes end chunk 1, its last 2 begin chunk 2. Exercises the 4-byte
+        ' carry branch (lead 81-FE, 2nd byte 30-39, needs 4 bytes present).
+        Const N As Long = 65534                  ' filler so the 4-byte seq starts at 65534
+        Dim p As String: p = TempPath("gb_split4.txt")
+        Dim body() As Byte
+        body = Concat(AsciiBytes(String$(N, "a")), BytesOf(&H81, &H30, &H81, &H30))
+        body = Concat(body, AsciiBytes("Z"))
+
+        Dim fso As New FileSystemObject
+        fso.WriteStream body, p
+        Dim ts As TextStream
+        Set ts = fso.OpenTextFile(p, ForReading, , encGB18030)
+        Assert.Exact.IsTrue ts.IsStreaming
+        Assert.Strict.AreEqual encGB18030, ts.Encoding
+
+        Dim s As String: s = ts.Read(100000)
+        Assert.Strict.AreEqual N + 2, Len(s)          ' N 'a' + U+0080 + 'Z'
+        Assert.Exact.AreEqual "a", Left$(s, 1)
+        Assert.Strict.AreEqual &H80, AscW(Mid$(s, N + 1, 1))   ' 4-byte char survived
+        Assert.Exact.AreEqual "Z", Right$(s, 1)
+        ts.Close
+        fso.DeleteFile p, ignoreMissing:=True
+    End Sub
+
+    '======================================================================
+    ' ===================  FILESYSTEM TESTS  ===============================
+    '======================================================================
+
+    '----------------------------------------------------------------------
+    ' Pure path parsing (no disk access)
+    '----------------------------------------------------------------------
+    Public Sub Test_PathParsing()
+        Dim fso As New FileSystemObject
+
+        ' BuildPath
+        Assert.Exact.AreEqual "C:\foo\bar", fso.BuildPath("C:\foo", "bar")       ' plain
+        Assert.Exact.AreEqual "C:\foo\bar", fso.BuildPath("C:\foo\", "bar")      ' trailing sep
+        Assert.Exact.AreEqual "C:\foo\bar", fso.BuildPath("C:\foo", "\bar")      ' leading sep
+        Assert.Exact.AreEqual "C:\foo\bar", fso.BuildPath("C:\foo\", "\bar")     ' both seps
+        Assert.Exact.AreEqual "bar", fso.BuildPath("", "bar")                    ' empty path
+        Assert.Exact.AreEqual "C:\foo", fso.BuildPath("C:\foo", "")             ' empty name
+        Assert.Exact.AreEqual "C:\foo\b\c", fso.BuildPath("C:/foo", "b/c")       ' normalizes slashes
+
+        ' GetFileName
+        Assert.Exact.AreEqual "bar.txt", fso.GetFileName("C:\foo\bar.txt")
+        Assert.Exact.AreEqual "foo", fso.GetFileName("C:\foo\")  ' trailing sep -> last component (FSO)
+        Assert.Exact.AreEqual "bar.txt", fso.GetFileName("bar.txt")             ' bare
+        Assert.Exact.AreEqual "bar.txt", fso.GetFileName("C:/foo/bar.txt")      ' forward slashes
+
+        ' GetParentFolderName
+        Assert.Exact.AreEqual "C:\foo", fso.GetParentFolderName("C:\foo\bar")
+        Assert.Exact.AreEqual "C:\foo", fso.GetParentFolderName("C:\foo\bar\")  ' trailing sep
+        Assert.Exact.AreEqual "\\server\share", fso.GetParentFolderName("\\server\share\folder")
+        Assert.Exact.AreEqual vbNullString, fso.GetParentFolderName("\\server\share")     ' UNC root -> empty
+
+        ' GetExtensionName
+        Assert.Exact.AreEqual "txt", fso.GetExtensionName("C:\foo\bar.txt")
+        Assert.Exact.AreEqual vbNullString, fso.GetExtensionName("C:\foo\bar")            ' none
+        Assert.Exact.AreEqual vbNullString, fso.GetExtensionName("C:\foo.bar\baz")        ' dot in folder only
+        Assert.Exact.AreEqual "gz", fso.GetExtensionName("archive.tar.gz")      ' multi-dot
+        Assert.Exact.AreEqual "gitignore", fso.GetExtensionName(".gitignore")            ' dotfile -> none
+
+        ' GetBaseName
+        Assert.Exact.AreEqual "bar", fso.GetBaseName("C:\foo\bar.txt")
+        Assert.Exact.AreEqual "bar", fso.GetBaseName("C:\foo\bar")              ' no ext
+        Assert.Exact.AreEqual "foo", fso.GetBaseName("C:\foo\")                 ' trailing sep
+        Assert.Exact.AreEqual "archive.tar", fso.GetBaseName("archive.tar.gz")  ' multi-dot
+        Assert.Exact.AreEqual "", fso.GetBaseName(".gitignore")       ' dotfile
+
+        ' GetDriveName
+        Assert.Exact.AreEqual "C:", fso.GetDriveName("C:\foo\bar")
+        Assert.Exact.AreEqual "\\server\share", fso.GetDriveName("\\server\share\x")
+        Assert.Exact.AreEqual "", fso.GetDriveName("foo\bar")                   ' relative -> empty
+        Assert.Exact.AreEqual "C:", fso.GetDriveName("C:/foo")                  ' forward slashes
+    End Sub
+
+    Public Sub Test_CleanFileName()
+        Dim fso As New FileSystemObject
+
+        Assert.Exact.AreEqual "abcd.txt", fso.CleanFileName("a<b>c:d.txt")       ' removes reserved chars
+        Assert.Exact.AreEqual "My&File #2.txt", fso.CleanFileName("My&File #2.txt") ' keeps legal punctuation
+        Assert.Exact.AreEqual "a_b_c", fso.CleanFileName("a/b\c", "_")           ' replacement char
+        Assert.Exact.AreEqual "name", fso.CleanFileName("name.  ")               ' trims trailing dots/spaces
+        Assert.Exact.AreEqual "leading", fso.CleanFileName("  leading")          ' trims leading spaces
+        Assert.Exact.AreEqual "dots", fso.CleanFileName("dots...")               ' trims trailing dots
+
+        ' Reserved device names
+        Assert.Exact.AreEqual "CON_", fso.CleanFileName("CON")
+        Assert.Exact.AreEqual "con_.txt", fso.CleanFileName("con.txt")           ' case-insensitive
+        Assert.Exact.AreEqual "LPT3_", fso.CleanFileName("LPT3")
+        Assert.Exact.AreEqual "COM0_", fso.CleanFileName("COM0")
+        Assert.Exact.AreEqual "connect.txt", fso.CleanFileName("connect.txt")    ' non-reserved lookalike
+        Assert.Exact.AreEqual "LPT10", fso.CleanFileName("LPT10")                ' not reserved
+    End Sub
+
+    Public Sub Test_AbsolutePaths()
+        Dim fso As New FileSystemObject
+
+        Assert.Exact.AreEqual "C:\bar", fso.GetAbsolutePathName("C:\foo\..\bar")       ' collapses ..
+        Assert.Exact.AreEqual "C:\foo\bar", fso.GetAbsolutePathName("C:\foo\.\bar")    ' collapses .
+        Assert.Exact.AreEqual "C:\foo", fso.GetAbsolutePathName("C:\foo\")             ' strips trailing slash
+        Assert.Exact.AreEqual "C:\", fso.GetAbsolutePathName("C:\")                    ' keeps drive root
+        Assert.Exact.AreEqual "C:\base\sub\file.txt", _
+                              fso.GetAbsolutePathName("sub\file.txt", "C:\base")       ' with base dir
+    End Sub
+    
+    ' The baseDirectory block in GetAbsolutePathName - the only path that used
+    ' PathCombineW (shlwapi, hard-capped at 260) before it became lexical. The
+    ' root-relative and UNC cases are the semantics worth pinning: a lexical join
+    ' must NOT quietly turn "\baz" into base & "\baz".
+    Public Sub Test_AbsolutePaths_WithBase()
+        Dim fso As New FileSystemObject
+
+        ' Root-relative name takes the ROOT of the base, not the whole base
+        Assert.Exact.AreEqual "C:\baz", fso.GetAbsolutePathName("\baz", "C:\foo\bar")
+
+        ' An already-absolute name ignores the base entirely
+        Assert.Exact.AreEqual "D:\other", fso.GetAbsolutePathName("D:\other", "C:\foo")
+
+        ' UNC base: the "root" is \\server\share
+        Assert.Exact.AreEqual "\\server\share\b", _
+                              fso.GetAbsolutePathName("\b", "\\server\share\a")
+        Assert.Exact.AreEqual "\\server\share\a\b", _
+                              fso.GetAbsolutePathName("b", "\\server\share\a")
+
+        ' Drive-relative ("C:foo") with a same-drive base resolves against the base
+        Assert.Exact.AreEqual "C:\base\foo", fso.GetAbsolutePathName("C:foo", "C:\base")
+
+        ' Trailing separator on the base must not double up
+        Assert.Exact.AreEqual "C:\base\sub", fso.GetAbsolutePathName("sub", "C:\base\")
+
+        ' ".." still collapses - the join is lexical, GetFullPathNameW canonicalizes
+        Assert.Exact.AreEqual "C:\other", fso.GetAbsolutePathName("..\other", "C:\base")
+
+        ' Empty name yields the base
+        Assert.Exact.AreEqual "C:\base", fso.GetAbsolutePathName("", "C:\base")
+    End Sub
+
+    ' The regression itself. Purely lexical, so it needs NO fixture on disk -
+    ' GetAbsolutePathName never touches the filesystem. Fails with PathCombineW
+    ' (260-capped, raises 52); passes once the join is lexical.
+    Public Sub Test_AbsolutePaths_WithBase_LongPath()
+        Dim fso As New FileSystemObject
+        Dim deep As String, i As Long
+
+        deep = "C:\lp"
+        For i = 1 To 12
+            deep = deep & "\seg_0123456789_abcdefghijkl" & Right$("00" & i, 2)
+        Next i                                   ' ~360 chars, nothing on disk
+
+        Assert.Exact.IsTrue Len(deep) > 260            ' guard: the case must actually be long
+        Assert.Exact.AreEqual deep & "\file.txt", _
+                              fso.GetAbsolutePathName("file.txt", deep)
+    End Sub
+
+    Public Sub Test_RelativePaths()
+        Dim fso As New FileSystemObject
+        Dim base As String
+        base = fso.GetSpecialFolder(sfDocuments)
+
+        Assert.Exact.AreEqual "sub\file.txt", _
+            fso.GetRelativePath(base, fso.BuildPath(base, "sub\file.txt"))             ' descend
+        Assert.Exact.AreEqual "..\B", _
+            fso.GetRelativePath(fso.BuildPath(base, "A"), fso.BuildPath(base, "B"))    ' sibling
+        Assert.Exact.AreEqual ".", fso.GetRelativePath(base, base)                     ' to self
+        Assert.Exact.AreEqual "D:\bbb", fso.GetRelativePath("C:\aaa", "D:\bbb")        ' across drives -> absolute
+
+        ' Real sibling folders, only when they actually share a parent on this box
+        Dim docs As String, desk As String
+        docs = fso.GetSpecialFolder(sfDocuments)
+        desk = fso.GetSpecialFolder(sfDesktop)
+        If StrComp(fso.GetParentFolderName(docs), fso.GetParentFolderName(desk), vbTextCompare) = 0 Then
+            Assert.Exact.AreEqual "..\" & fso.GetFileName(desk), fso.GetRelativePath(docs, desk)
+        End If
+    End Sub
+
+    Public Sub Test_SpecialFolders()
+        Dim fso As New FileSystemObject
+        Assert.Exact.AreEqual fso.GetSpecialFolder(sfDocuments), fso.BuildPath(Environ$("UserProfile"), "Documents")
+        Assert.Exact.IsTrue fso.FolderExists(fso.GetSpecialFolder(sfWindowsFolder))
+        Assert.Exact.IsTrue fso.FolderExists(fso.GetSpecialFolder(sfSystemFolder))
+        Assert.Exact.IsTrue fso.FolderExists(fso.GetSpecialFolder(sfTemporaryFolder))
+        ' Documented contract: no trailing backslash (drive roots excepted)
+        Assert.Exact.IsTrue Right$(fso.GetSpecialFolder(sfWindowsFolder), 1) <> "\"
+    End Sub
+
+    '----------------------------------------------------------------------
+    ' Existence
+    '----------------------------------------------------------------------
+    Public Sub Test_Existence()
+        Dim fso As New FileSystemObject
+        Dim wf As String: wf = CleanFolder("exists")
+
+        Dim ef As String: ef = fso.BuildPath(wf, "exists.txt")
+        fso.StringToTextFile "e", ef, encUtf8
+
+        Assert.Exact.IsTrue fso.FileExists(ef)
+        Assert.Exact.IsFalse fso.FolderExists(ef)
+        Assert.Exact.IsTrue fso.FolderExists(wf)
+        Assert.Exact.IsFalse fso.FileExists(wf)
+        Assert.Exact.IsFalse fso.FileExists(fso.BuildPath(wf, "nope.zzz"))
+
+        Dim sysDrive As String: sysDrive = Left$(fso.GetSpecialFolder(WindowsFolder), 1)
+        Assert.Exact.IsTrue fso.DriveExists(sysDrive)
+        Assert.Exact.IsTrue fso.DriveExists(sysDrive & ":\")
+        Assert.Exact.IsFalse fso.DriveExists("1")
+        Assert.Exact.IsFalse fso.DriveExists("")
+
+        fso.DeleteFolder wf, True
+    End Sub
+
+    '----------------------------------------------------------------------
+    ' Text round-trips with explicit code pages
+    '----------------------------------------------------------------------
+    Public Sub Test_TextRoundTrip()
+        Dim fso As New FileSystemObject
+        Dim uni As String: uni = SampleUnicode()
+
+        ' Known code-page on both write and read
+        AssertRoundTrip uni, encUtf8                      ' UTF-8
+        AssertRoundTrip uni, encUtf16                     ' UTF-16LE
+        AssertRoundTrip uni, encUtf16Be                   ' UTF-16BE
+        AssertRoundTrip uni, encUtf32                     ' UTF-32LE
+        AssertRoundTrip uni, encUtf32Be                   ' UTF-32BE
+        AssertRoundTrip SampleLatin1(), encSystemAnsi     ' single-byte CP-1252
+
+        ' Auto-detect on read (no BOM)
+        AssertRoundTrip uni, encUtf8, True
+        AssertRoundTrip uni, encUtf16, True
+        AssertRoundTrip uni, encUtf16Be, True
+        AssertRoundTrip uni, encUtf32, True
+        AssertRoundTrip uni, encUtf32Be, True
+
+        ' Auto-detect on read (with BOM)
+        AssertRoundTrip uni, encUtf8Bom, True
+        AssertRoundTrip uni, encUtf16Bom, True
+        AssertRoundTrip uni, encUtf16BeBom, True
+        AssertRoundTrip uni, encUtf32Bom, True
+        AssertRoundTrip uni, encUtf32BeBom, True
+        AssertRoundTrip uni, encUtf7Bom, True
+        AssertRoundTrip uni, encGB18030Bom, True
+
+        ' Empty content round-trips through the class (0-byte file -> empty string)
+        Dim emptyBytes() As Byte
+        Dim p As String: p = TempPath("empty_stream.bin")
+        fso.WriteStream emptyBytes, p                     ' unallocated array
+        Assert.Exact.AreEqual vbNullString, fso.TextFileToString(p)
+        fso.DeleteFile p, ignoreMissing:=True
+
+        Dim pt As String: pt = TempPath("empty_text.txt")
+        fso.StringToTextFile "", pt, encUtf8              ' empty-string encode path
+        Assert.Exact.AreEqual vbNullString, fso.TextFileToString(pt)
+        fso.DeleteFile pt, ignoreMissing:=True
+
+        ' Missing file should raise (the class raises rather than returning "")
+        Dim e As Long
+        On Error Resume Next
+        fso.TextFileToString TempPath("missing.zzz")
+        e = Err.Number
+        On Error GoTo 0
+        Assert.Exact.IsTrue (e <> 0)
+    End Sub
+
+    ' Private helper: write text in the given encoding, read it back (optionally
+    ' via auto-detect), and assert an exact round-trip. Self-contained (own fso).
+    Private Sub AssertRoundTrip(ByVal text As String, ByVal cp As TextEncoding, Optional ByVal autoDetect As Boolean = False)
+        Dim fso As New FileSystemObject
+        Dim p As String
+        If cp < -1 Then
+            p = TempPath("rt_" & CStr(Abs(cp)) & "_bom.txt")
+        Else
+            p = TempPath("rt_" & CStr(cp) & ".txt")
+        End If
+        fso.StringToTextFile text, p, cp
+        Dim back As String
+        If autoDetect Then
+            back = fso.TextFileToString(p)
+        Else
+            back = fso.TextFileToString(p, cp)
+        End If
+        Assert.Exact.AreEqual text, back
+        fso.DeleteFile p, ignoreMissing:=True
+    End Sub
+
+    '----------------------------------------------------------------------
+    ' Newline conversion
+    '----------------------------------------------------------------------
+    Public Sub Test_Newlines()
+        Dim fso As New FileSystemObject
+        Dim p As String: p = TempPath("newlines.txt")
+        Dim crlf As String: crlf = "line1" & vbCrLf & "line2" & vbCrLf & "line3"
+        fso.StringToTextFile crlf, p, encUtf8
+
+        Dim u As String: u = fso.TextFileToString(p, encUtf8, nlUnix)
+        Assert.Exact.IsTrue InStr(u, vbCrLf) = 0                          ' CRLF removed
+        Assert.Exact.AreEqual "line1" & vbLf & "line2" & vbLf & "line3", u
+        Assert.Exact.AreEqual crlf, fso.TextFileToString(p, encUtf8)      ' no-change preserves
+
+        fso.DeleteFile p, ignoreMissing:=True
+    End Sub
+
+    '----------------------------------------------------------------------
+    ' Raw byte stream read/write (incl. read-only overwrite)
+    '----------------------------------------------------------------------
+    Public Sub Test_Streams()
+        Dim fso As New FileSystemObject
+        Dim p As String: p = TempPath("stream.bin")
+
+        Dim wb(0 To 4) As Byte
+        wb(0) = 1: wb(1) = 2: wb(2) = 3: wb(3) = 254: wb(4) = 255
+        fso.WriteStream wb, p
+
+        Dim rb() As Byte
+        fso.ReadStream p, rb
+        Assert.Strict.AreEqual 4&, CLng(UBound(rb))                       ' round-trip size
+        Assert.Exact.IsTrue (rb(0) = 1 And rb(4) = 255)                   ' round-trip bytes
+
+        ' Overwrite a read-only file (WriteStream should clear RO then replace)
+        fso.GetFile(p).Attributes = ReadOnly
+        Dim wb2(0 To 1) As Byte
+        wb2(0) = 42: wb2(1) = 43
+        fso.WriteStream wb2, p
+        fso.ReadStream p, rb
+        Assert.Exact.IsTrue (UBound(rb) = 1 And rb(0) = 42 And rb(1) = 43)
+
+        fso.DeleteFile p, True, ignoreMissing:=True
+    End Sub
+
+ 
+
+    '----------------------------------------------------------------------
+    ' File copy / move / delete (incl. wildcards and error paths)
+    '----------------------------------------------------------------------
+    '----------------------------------------------------------------------
+    ' Helper: assert a folder contains EXACTLY the given file names
+    ' (non-recursive). Takes fso as a parameter so tests stay standalone.
+    '----------------------------------------------------------------------
+    Private Sub AssertFilesExactly(ByVal fso As FileSystemObject, ByVal folderPath As String, ParamArray names() As Variant)
+        Dim found As Collection
+        Set found = fso.GetFilePaths(folderPath)
+        Assert.Strict.AreEqual UBound(names) - LBound(names) + 1, found.Count
+        Dim i As Long
+        For i = LBound(names) To UBound(names)
+            Assert.Exact.IsTrue fso.FileExists(fso.BuildPath(folderPath, CStr(names(i))))
+        Next
+    End Sub
+
+    '----------------------------------------------------------------------
+    ' File copy / move / delete (incl. wildcards and error paths)
+    '----------------------------------------------------------------------
+    Public Sub Test_FileCopyMoveDelete()
+        Dim fso As New FileSystemObject
+        Dim wf As String: wf = CleanFolder("fcmd")
+        Dim e As Long
+
+        ' --- CopyFile (single) ---
+        Dim src As String, dst As String
+        src = fso.BuildPath(wf, "src.txt")
+        dst = fso.BuildPath(wf, "dst.txt")
+        fso.StringToTextFile "hello", src, encUtf8
+        fso.CopyFile src, dst
+        Assert.Exact.IsTrue fso.FileExists(dst)
+        Assert.Exact.AreEqual "hello", fso.TextFileToString(dst)
+
+        On Error Resume Next
+        fso.CopyFile src, dst, False                ' no overwrite, dst exists
+        e = Err.Number
+        On Error GoTo 0
+        Assert.Strict.AreEqual 58&, e         ' no-overwrite raises 58
+
+        ' --- Wildcard copy into a PRE-EXISTING destination folder ---
+        Dim wsrc As String, wdst As String
+        wsrc = fso.BuildPath(wf, "wsrc")
+        wdst = fso.BuildPath(wf, "wdst")
+        fso.CreateFolder wsrc
+        fso.CreateFolder wdst
+        fso.StringToTextFile "a", fso.BuildPath(wsrc, "a.txt"), encUtf8
+        fso.StringToTextFile "b", fso.BuildPath(wsrc, "b.txt"), encUtf8
+        fso.StringToTextFile "c", fso.BuildPath(wsrc, "c.log"), encUtf8
+        fso.CopyFile fso.BuildPath(wsrc, "*.txt"), wdst
+        AssertFilesExactly fso, wdst, "a.txt", "b.txt"
+        Assert.Exact.IsFalse fso.FileExists(fso.BuildPath(wdst, "c.log"))
+
+        ' --- Wildcard copy into a MISSING destination raises 76 (FSO parity) ---
+        ' FSO requires the destination container to pre-exist for file ops; it does
+        ' not create it. (Distinct from whole-folder copy, which DOES create.)
+        Dim wmiss As String: wmiss = fso.BuildPath(wf, "wdst_missing")   ' deliberately not created
+        On Error Resume Next
+        fso.CopyFile fso.BuildPath(wsrc, "*.txt"), wmiss
+        e = Err.Number
+        On Error GoTo 0
+        Assert.Strict.AreEqual 76&, e
+        Assert.Exact.IsFalse fso.FolderExists(wmiss)                 ' nothing was created
+
+        ' --- Wildcard copy, no source match -> raises 53 (source checked first) ---
+        On Error Resume Next
+        fso.CopyFile fso.BuildPath(wsrc, "*.zzz"), wdst              ' dest exists; source matches nothing
+        e = Err.Number
+        On Error GoTo 0
+        Assert.Strict.AreEqual 53&, e
+
+        ' --- MoveFile (single) ---
+        Dim m1 As String, m2 As String
+        m1 = fso.BuildPath(wf, "mv1.txt")
+        m2 = fso.BuildPath(wf, "mv2.txt")
+        fso.StringToTextFile "x", m1, encUtf8
+        fso.MoveFile m1, m2
+        Assert.Exact.IsFalse fso.FileExists(m1)
+        Assert.Exact.IsTrue fso.FileExists(m2)
+
+        fso.StringToTextFile "y", m1, encUtf8
+        On Error Resume Next
+        fso.MoveFile m1, m2                         ' dst exists
+        e = Err.Number
+        On Error GoTo 0
+        Assert.Strict.AreEqual 58&, e
+
+        ' --- Wildcard move into a PRE-EXISTING container (all sources consumed) ---
+        Dim mvw As String: mvw = fso.BuildPath(wf, "mvwild_src")
+        Dim mvwd As String: mvwd = fso.BuildPath(wf, "mvwild_dst")
+        fso.CreateFolder mvw
+        fso.CreateFolder mvwd                                        ' container pre-created (FSO parity)
+        fso.StringToTextFile "1", fso.BuildPath(mvw, "m1.txt"), encUtf8
+        fso.StringToTextFile "2", fso.BuildPath(mvw, "m2.txt"), encUtf8
+        fso.StringToTextFile "3", fso.BuildPath(mvw, "skip.log"), encUtf8
+        fso.MoveFile fso.BuildPath(mvw, "*.txt"), mvwd
+        AssertFilesExactly fso, mvwd, "m1.txt", "m2.txt"                  ' both .txt moved in
+        Assert.Exact.IsFalse fso.FileExists(fso.BuildPath(mvw, "m1.txt")) ' sources gone
+        Assert.Exact.IsFalse fso.FileExists(fso.BuildPath(mvw, "m2.txt"))
+        Assert.Exact.IsTrue fso.FileExists(fso.BuildPath(mvw, "skip.log")) ' non-match untouched
+
+        ' --- Wildcard move into a MISSING container raises 76 ---
+        On Error Resume Next
+        fso.MoveFile fso.BuildPath(mvw, "*.log"), fso.BuildPath(wf, "mvwild_missing")
+        e = Err.Number
+        On Error GoTo 0
+        Assert.Strict.AreEqual 76&, e
+        Assert.Exact.IsTrue fso.FileExists(fso.BuildPath(mvw, "skip.log"))  ' source untouched on failure
+
+        ' --- Wildcard move, no source match -> raises 53 (files) ---
+        On Error Resume Next
+        fso.MoveFile fso.BuildPath(wf, "nomatch*.zzz"), mvwd
+        e = Err.Number
+        On Error GoTo 0
+        Assert.Strict.AreEqual 53&, e
+
+        ' --- DeleteFile (single) ---
+        Dim d1 As String: d1 = fso.BuildPath(wf, "del1.txt")
+        fso.StringToTextFile "d", d1, encUtf8
+        fso.DeleteFile d1
+        Assert.Exact.IsFalse fso.FileExists(d1)
+
+        ' --- DeleteFile force clears read-only ---
+        Dim dro As String: dro = fso.BuildPath(wf, "delro.txt")
+        fso.StringToTextFile "d", dro, encUtf8
+        fso.GetFile(dro).Attributes = ReadOnly
+        fso.DeleteFile dro, True                    ' force removes read-only
+        Assert.Exact.IsFalse fso.FileExists(dro)
+
+        ' --- Wildcard DeleteFile: matches removed by name, non-match left ---
+        Dim dw As String: dw = fso.BuildPath(wf, "delwild")
+        fso.CreateFolder dw
+        fso.StringToTextFile "1", fso.BuildPath(dw, "x1.txt"), encUtf8
+        fso.StringToTextFile "2", fso.BuildPath(dw, "x2.txt"), encUtf8
+        fso.StringToTextFile "3", fso.BuildPath(dw, "keep.log"), encUtf8
+        fso.DeleteFile fso.BuildPath(dw, "*.txt")
+        Assert.Exact.IsFalse fso.FileExists(fso.BuildPath(dw, "x1.txt"))     ' specific targets gone
+        Assert.Exact.IsFalse fso.FileExists(fso.BuildPath(dw, "x2.txt"))
+        Assert.Exact.IsTrue fso.FileExists(fso.BuildPath(dw, "keep.log"))    ' non-match untouched
+        Assert.Strict.AreEqual 1&, fso.GetFilePaths(dw).Count
+
+        ' --- Wildcard DeleteFile snapshot-then-act: ALL matches removed (none skipped) ---
+        Dim dsnap As String: dsnap = fso.BuildPath(wf, "delsnap")
+        fso.CreateFolder dsnap
+        Dim k As Long
+        For k = 1 To 5
+            fso.StringToTextFile "f", fso.BuildPath(dsnap, "f" & k & ".txt"), encUtf8
+        Next
+        fso.DeleteFile fso.BuildPath(dsnap, "*.txt")
+        Assert.Strict.AreEqual 0&, fso.GetFilePaths(dsnap).Count      ' every match deleted
+
+        ' --- ignoreMissing suppresses no-match; bare no-match raises 53 ---
+        fso.DeleteFile fso.BuildPath(dw, "doesnotexist.txt"), ignoreMissing:=True
+
+        On Error Resume Next
+        fso.DeleteFile fso.BuildPath(wf, "nothere.zzz")
+        e = Err.Number
+        On Error GoTo 0
+        Assert.Strict.AreEqual 53&, e         ' non-existent raises 53
+
+        ' --- Wildcard DeleteFile no-match: raises 53, suppressed by ignoreMissing ---
+        On Error Resume Next
+        fso.DeleteFile fso.BuildPath(dw, "*.zzz")
+        e = Err.Number
+        On Error GoTo 0
+        Assert.Strict.AreEqual 53&, e
+        fso.DeleteFile fso.BuildPath(dw, "*.zzz"), ignoreMissing:=True       ' no raise
+
+        fso.DeleteFolder wf, True
+    End Sub
+
+    '----------------------------------------------------------------------
+    ' Folder copy / move / delete / create (incl. wildcards)
+    '----------------------------------------------------------------------
+    Public Sub Test_FolderOps()
+        Dim fso As New FileSystemObject
+        Dim wf As String: wf = CleanFolder("folderops")
+        Dim e As Long
+
+        ' CreateFolder
+        Dim nf As String: nf = fso.BuildPath(wf, "newfolder")
+        fso.CreateFolder nf
+        Assert.Exact.IsTrue fso.FolderExists(nf)
+
+        ' CreateFolder createIntermediates:=True (creates the missing parent chain)
+        Dim ciTop As String, ciMid As String, ciDeep As String, ciErr As Long
+        Dim ciFolder As Folder
+        ciTop = fso.BuildPath(wf, "ci_a")
+        ciMid = fso.BuildPath(ciTop, "b")
+        ciDeep = fso.BuildPath(ciMid, "c")
+        ' default (createIntermediates omitted): a missing parent must still raise 76 - FSO parity
+        On Error Resume Next
+        fso.CreateFolder ciDeep
+        ciErr = Err.Number
+        On Error GoTo 0
+        Assert.Strict.AreEqual 76&, ciErr
+        Assert.Exact.IsFalse fso.FolderExists(ciTop)            ' the failed default attempt created nothing
+        ' createIntermediates:=True builds every missing level and returns the leaf Folder
+        Set ciFolder = fso.CreateFolder(ciDeep, createIntermediates:=True)
+        Assert.Exact.IsTrue fso.FolderExists(ciTop)
+        Assert.Exact.IsTrue fso.FolderExists(ciMid)
+        Assert.Exact.IsTrue fso.FolderExists(ciDeep)
+        Assert.Exact.IsTrue Not (ciFolder Is Nothing)
+        ' contract: still errors 58 if the target already exists, even with createIntermediates
+        On Error Resume Next
+        fso.CreateFolder ciDeep, createIntermediates:=True
+        ciErr = Err.Number
+        On Error GoTo 0
+        Assert.Strict.AreEqual 58&, ciErr
+
+        ' CopyFolder (recursive, single) -- non-wildcard dest is CREATED (FSO parity)
+        Dim tree As String, treecopy As String
+        tree = fso.BuildPath(wf, "tree")
+        treecopy = fso.BuildPath(wf, "treecopy")
+        fso.CreateFolder tree
+        fso.CreateFolder fso.BuildPath(tree, "sub")
+        fso.StringToTextFile "1", fso.BuildPath(tree, "f1.txt"), encUtf8
+        fso.StringToTextFile "2", fso.BuildPath(tree, "sub\f2.txt"), encUtf8
+        fso.CopyFolder tree, treecopy                               ' treecopy does not pre-exist: created
+        Assert.Exact.IsTrue fso.FileExists(fso.BuildPath(treecopy, "f1.txt"))
+        Assert.Exact.IsTrue fso.FileExists(fso.BuildPath(treecopy, "sub\f2.txt"))
+
+        ' --- Wildcard CopyFolder into a PRE-EXISTING container ---
+        Dim cfw As String: cfw = fso.BuildPath(wf, "cfw_src")
+        Dim cfwd As String: cfwd = fso.BuildPath(wf, "cfw_dst")
+        fso.CreateFolder cfw
+        fso.CreateFolder cfwd                                        ' container pre-created (FSO parity)
+        fso.CreateFolder fso.BuildPath(cfw, "keepA")
+        fso.CreateFolder fso.BuildPath(cfw, "keepB")
+        fso.CreateFolder fso.BuildPath(cfw, "other")
+        fso.StringToTextFile "a", fso.BuildPath(cfw, "keepA\inside.txt"), encUtf8
+        fso.CopyFolder fso.BuildPath(cfw, "keep*"), cfwd
+        Assert.Strict.AreEqual 2&, CLng(fso.GetFolder(cfwd).SubFolders.Count)    ' exactly the two matches
+        Assert.Exact.IsTrue fso.FolderExists(fso.BuildPath(cfwd, "keepA"))
+        Assert.Exact.IsTrue fso.FolderExists(fso.BuildPath(cfwd, "keepB"))
+        Assert.Exact.IsFalse fso.FolderExists(fso.BuildPath(cfwd, "other"))      ' non-match excluded
+        Assert.Exact.IsTrue fso.FileExists(fso.BuildPath(cfwd, "keepA\inside.txt")) ' recursive contents
+
+        ' --- Wildcard CopyFolder into a MISSING container raises 76 ---
+        On Error Resume Next
+        fso.CopyFolder fso.BuildPath(cfw, "keep*"), fso.BuildPath(wf, "cfwd_missing")
+        e = Err.Number
+        On Error GoTo 0
+        Assert.Strict.AreEqual 76&, CLng(e)
+        Assert.Exact.IsFalse fso.FolderExists(fso.BuildPath(wf, "cfwd_missing"))
+
+        ' --- Wildcard CopyFolder, no source match -> raises 76 (folders) ---
+        On Error Resume Next
+        fso.CopyFolder fso.BuildPath(wf, "nofolder*"), cfwd         ' dest exists; source matches nothing
+        e = Err.Number
+        On Error GoTo 0
+        Assert.Strict.AreEqual 76&, CLng(e)
+
+        ' MoveFolder (single) -- non-wildcard dest is the new name (created)
+        Dim ms As String, md As String
+        ms = fso.BuildPath(wf, "mvfolder_src")
+        md = fso.BuildPath(wf, "mvfolder_dst")
+        fso.CreateFolder ms
+        fso.StringToTextFile "z", fso.BuildPath(ms, "z.txt"), encUtf8
+        fso.MoveFolder ms, md                                       ' md does not pre-exist: becomes the moved folder
+        Assert.Exact.IsFalse fso.FolderExists(ms)
+        Assert.Exact.IsTrue fso.FileExists(fso.BuildPath(md, "z.txt"))
+
+        ' --- Wildcard MoveFolder into a PRE-EXISTING container (sources gone) ---
+        Dim mfw As String: mfw = fso.BuildPath(wf, "mfw_src")
+        Dim mfwd As String: mfwd = fso.BuildPath(wf, "mfw_dst")
+        fso.CreateFolder mfw
+        fso.CreateFolder mfwd                                        ' container pre-created (FSO parity)
+        fso.CreateFolder fso.BuildPath(mfw, "movA")
+        fso.CreateFolder fso.BuildPath(mfw, "movB")
+        fso.CreateFolder fso.BuildPath(mfw, "stay")
+        fso.MoveFolder fso.BuildPath(mfw, "mov*"), mfwd
+        Assert.Strict.AreEqual 2&, CLng(fso.GetFolder(mfwd).SubFolders.Count)    ' both matches moved in
+        Assert.Exact.IsTrue fso.FolderExists(fso.BuildPath(mfwd, "movA"))
+        Assert.Exact.IsTrue fso.FolderExists(fso.BuildPath(mfwd, "movB"))
+        Assert.Exact.IsFalse fso.FolderExists(fso.BuildPath(mfw, "movA"))        ' sources consumed
+        Assert.Exact.IsFalse fso.FolderExists(fso.BuildPath(mfw, "movB"))
+        Assert.Exact.IsTrue fso.FolderExists(fso.BuildPath(mfw, "stay"))         ' non-match untouched
+
+        ' --- Wildcard MoveFolder into a MISSING container raises 76 ---
+        fso.CreateFolder fso.BuildPath(mfw, "movC")
+        On Error Resume Next
+        fso.MoveFolder fso.BuildPath(mfw, "mov*"), fso.BuildPath(wf, "mfwd_missing")
+        e = Err.Number
+        On Error GoTo 0
+        Assert.Strict.AreEqual 76&, CLng(e)
+        Assert.Exact.IsTrue fso.FolderExists(fso.BuildPath(mfw, "movC"))         ' source untouched on failure
+        Assert.Exact.IsFalse fso.FolderExists(fso.BuildPath(wf, "mfwd_missing"))
+
+        ' --- Wildcard MoveFolder, no source match -> raises 76 ---
+        On Error Resume Next
+        fso.MoveFolder fso.BuildPath(wf, "nofolder*"), mfwd
+        e = Err.Number
+        On Error GoTo 0
+        Assert.Strict.AreEqual 76&, CLng(e)
+
+        ' --- DeleteFolder (recursive, force, single) ---
+        Dim df As String: df = fso.BuildPath(wf, "todelete")
+        fso.CreateFolder df
+        fso.StringToTextFile "d", fso.BuildPath(df, "d.txt"), encUtf8
+        fso.DeleteFolder df, True
+        Assert.Exact.IsFalse fso.FolderExists(df)
+
+        ' --- Wildcard DeleteFolder (multi-match, non-empty -> exercises recursion; non-match left) ---
+        Dim dfw As String: dfw = fso.BuildPath(wf, "delfw")
+        fso.CreateFolder dfw
+        fso.CreateFolder fso.BuildPath(dfw, "delA")
+        fso.CreateFolder fso.BuildPath(dfw, "delB")
+        fso.CreateFolder fso.BuildPath(dfw, "keepX")
+        fso.StringToTextFile "x", fso.BuildPath(dfw, "delA\inside.txt"), encUtf8   ' non-empty: recursion path
+        fso.DeleteFolder fso.BuildPath(dfw, "del*"), True
+        Assert.Exact.IsFalse fso.FolderExists(fso.BuildPath(dfw, "delA"))
+        Assert.Exact.IsFalse fso.FolderExists(fso.BuildPath(dfw, "delB"))
+        Assert.Exact.IsTrue fso.FolderExists(fso.BuildPath(dfw, "keepX"))          ' non-match untouched
+
+        ' --- Wildcard DeleteFolder snapshot-then-act: ALL matches removed (none skipped) ---
+        Dim dsnap As String: dsnap = fso.BuildPath(wf, "delsnap")
+        fso.CreateFolder dsnap
+        Dim j As Long
+        For j = 1 To 5
+            fso.CreateFolder fso.BuildPath(dsnap, "d" & j)
+        Next
+        fso.DeleteFolder fso.BuildPath(dsnap, "d*"), True
+        Assert.Strict.AreEqual 0&, CLng(fso.GetFolder(dsnap).SubFolders.Count)     ' every match deleted
+
+        ' --- Wildcard DeleteFolder no-match: raises 76, suppressed by ignoreMissing ---
+        On Error Resume Next
+        fso.DeleteFolder fso.BuildPath(dfw, "nomatch*"), True
+        e = Err.Number
+        On Error GoTo 0
+        Assert.Strict.AreEqual 76&, CLng(e)
+        fso.DeleteFolder fso.BuildPath(dfw, "nomatch*"), True, ignoreMissing:=True  ' no raise
+
+        fso.DeleteFolder wf, True
+    End Sub
+    '----------------------------------------------------------------------
+    ' GetFilePaths
+    '----------------------------------------------------------------------
+    Public Sub Test_GetFilePaths()
+        Dim fso As New FileSystemObject
+        Dim g As String: g = CleanFolder("getfiles")
+
+        fso.StringToTextFile "a", fso.BuildPath(g, "a.txt"), encUtf8
+        fso.StringToTextFile "b", fso.BuildPath(g, "b.txt"), encUtf8
+        fso.StringToTextFile "c", fso.BuildPath(g, "c.log"), encUtf8
+
+        Dim h As String: h = fso.BuildPath(g, "hidden.txt")
+        fso.StringToTextFile "h", h, encUtf8
+        fso.GetFile(h).Attributes = Hidden
+
+        fso.CreateFolder fso.BuildPath(g, "subdir")
+        fso.StringToTextFile "d", fso.BuildPath(g, "subdir\d.txt"), encUtf8
+
+        Assert.Strict.AreEqual 3&, fso.GetFilePaths(g).Count                    ' default
+        Assert.Strict.AreEqual 2&, fso.GetFilePaths(g, "*.txt").Count           ' pattern
+        Assert.Strict.AreEqual 4&, fso.GetFilePaths(g, "*", True).Count   ' includeHidden
+        Assert.Strict.AreEqual 3&, fso.GetFilePaths(g, "*.txt", False, False, True).Count ' recursive
+
+        ' Full-path option
+        Dim col As Collection
+        Set col = fso.GetFilePaths(g, "a.txt")
+        Assert.Strict.AreEqual 1&, col.Count
+        Assert.Exact.AreEqual fso.BuildPath(g, "a.txt"), col(1)
+
+        fso.DeleteFolder g, True
+    End Sub
+
+    '----------------------------------------------------------------------
+    ' Rename
+    '----------------------------------------------------------------------
+    Public Sub Test_Rename()
+        Dim fso As New FileSystemObject
+        Dim wf As String: wf = CleanFolder("rename")
+        Dim e As Long
+
+        Dim r As String: r = fso.BuildPath(wf, "ren1.txt")
+        fso.StringToTextFile "r", r, encUtf8
+        fso.Rename r, "ren2.txt"
+        Assert.Exact.IsFalse fso.FileExists(r)
+        Assert.Exact.IsTrue fso.FileExists(fso.BuildPath(wf, "ren2.txt"))
+        
+        r = fso.BuildPath(wf, "ren3.txt")
+        fso.StringToTextFile "r", r, encUtf8
+        fso.Rename r, "REN3.txt"
+        Assert.Exact.IsTrue fso.FileExists(r)
+        Assert.Exact.IsTrue fso.FileExists(fso.BuildPath(wf, "REN3.txt"))
+        Assert.Exact.IsTrue fso.GetFile(r).Name = "REN3.txt"
+
+        On Error Resume Next
+        fso.Rename fso.BuildPath(wf, "ren2.txt"), "sub\bad.txt"   ' path not allowed
+        e = Err.Number
+        On Error GoTo 0
+        Assert.Strict.AreEqual 5&, CLng(e)
+
+        fso.DeleteFolder wf, True
+    End Sub
+
+    '----------------------------------------------------------------------
+    ' GetTempName
+    '----------------------------------------------------------------------
+    Public Sub Test_TempName()
+        Dim fso As New FileSystemObject
+        Dim wf As String: wf = CleanFolder("tempname")
+
+        Dim t As String: t = fso.GetTempName("pre_", ".tmp")
+        Assert.Exact.IsTrue Left$(t, 4) = "pre_"                  ' honors prefix
+        Assert.Exact.IsTrue Right$(t, 4) = ".tmp"                 ' honors extension
+        Assert.Strict.AreEqual 16&, CLng(Len(t))                 ' prefix(4) + 8 + ext(4)
+
+        Dim t2 As String: t2 = fso.GetTempName("pre_", ".tmp", wf)
+        Assert.Exact.IsFalse fso.FileExists(fso.BuildPath(wf, t2))    ' inFolder is free (file)
+        Assert.Exact.IsFalse fso.FolderExists(fso.BuildPath(wf, t2))  ' inFolder is free (folder)
+
+        fso.DeleteFolder wf, True
+    End Sub
+
+    '----------------------------------------------------------------------
+    ' GetFileVersion (against a known system DLL)
+    '----------------------------------------------------------------------
+    Public Sub Test_FileVersion()
+        Dim fso As New FileSystemObject
+        Dim k32 As String
+        k32 = fso.BuildPath(fso.GetSpecialFolder(SystemFolder), "kernel32.dll")
+        Dim ver As String
+        ver = fso.GetFileVersion(k32, fvProductString)
+        Assert.Exact.IsTrue Len(ver) > 0                         ' returns a value
+        Assert.Exact.IsTrue InStr(ver, ".") > 0                  ' looks like a version string
+    End Sub
+
+    '----------------------------------------------------------------------
+    ' GetCurrentDirectory / SetCurrentDirectory
+    '   Capture results, then restore CWD and clean up BEFORE asserting, so a
+    '   failure can never leave the process CWD pointing into a temp folder.
+    '----------------------------------------------------------------------
+    Public Sub Test_CurrentDirectory()
+        Dim fso As New FileSystemObject
+        Dim wf As String: wf = CleanFolder("cwd")
+        Dim saved As String: saved = fso.GetCurrentDir()
+
+        fso.SetCurrentDir wf
+        fso.StringToTextFile "cwd", "cwdtest.tmp", encUtf8        ' relative write
+        Dim landed As Boolean
+        landed = fso.FileExists(fso.BuildPath(wf, "cwdtest.tmp"))
+        Dim reflects As Boolean
+        reflects = InStr(1, fso.GetCurrentDir(), fso.GetFileName(wf), vbTextCompare) > 0
+
+        fso.SetCurrentDir saved                            ' restore before asserting
+        fso.DeleteFolder wf, True
+
+        Assert.Exact.IsTrue landed                               ' relative write landed in new CWD
+        Assert.Exact.IsTrue reflects                             ' reported CWD reflects the change
+    End Sub
+
+    '----------------------------------------------------------------------
+    ' Mixed-newline array / string reads
+    '----------------------------------------------------------------------
+    [Description("Mixed CR/LF/CRLF endings split into clean line elements - guards the ChangeNewLine Replace ordering.")]
+    Public Sub TestArray_MixedNewlines()
+        Dim fso As New FileSystemObject
+        Dim p As String: p = TempPath("mixed_newlines_arr.txt")
+
+        ' Write deliberately mixed endings VERBATIM (default newline = nlNoChange)
+        Dim mixed As String: mixed = "a" & vbCrLf & "b" & vbLf & "c" & vbCr & "d"
+        fso.StringToTextFile mixed, p, encUtf8
+
+        Dim arr As Variant
+        arr = fso.TextFileToArray(p)                             ' encoding auto-detected
+
+        Dim n As Long: n = UBound(arr) - LBound(arr) + 1
+        Assert.Strict.AreEqual 4&, CLng(n)
+
+        Dim base As Long: base = LBound(arr)
+        Assert.Exact.AreEqual "a", CStr(arr(base + 0))
+        Assert.Exact.AreEqual "b", CStr(arr(base + 1))
+        Assert.Exact.AreEqual "c", CStr(arr(base + 2))
+        Assert.Exact.AreEqual "d", CStr(arr(base + 3))
+
+        fso.DeleteFile p, ignoreMissing:=True
+    End Sub
+
+    [Description("Mixed endings normalize to CRLF on a whole-file string read (nlWindows).")]
+    Public Sub TestString_MixedNewlines()
+        Dim fso As New FileSystemObject
+        Dim p As String: p = TempPath("mixed_newlines_str.txt")
+
+        Dim mixed As String: mixed = "a" & vbCrLf & "b" & vbLf & "c" & vbCr & "d"
+        fso.StringToTextFile mixed, p, encUtf8                   ' verbatim
+
+        Dim back As String: back = fso.TextFileToString(p, encUtf8, nlWindows)
+        Assert.Exact.AreEqual "a" & vbCrLf & "b" & vbCrLf & "c" & vbCrLf & "d", back
+
+        fso.DeleteFile p, ignoreMissing:=True
+    End Sub
+
+    '----------------------------------------------------------------------
+    ' NormalizeTextFile
+    '----------------------------------------------------------------------
+    Public Sub Test_NormalizeTextFile()
+        Dim fso As New FileSystemObject
+        Dim wf As String: wf = CleanFolder("normalize")
+        Dim p As String, got As String, changed As Boolean
+        p = fso.BuildPath(wf, "norm.txt")
+
+        ' --- Newline conversion: Unix LF -> Windows CRLF ---
+        fso.StringToTextFile "x" & vbLf & "y" & vbLf, p, encUtf8, nlNoChange   ' raw LF
+        changed = fso.NormalizeTextFile(p)                       ' defaults: encUtf8, nlWindows
+        Assert.Exact.IsTrue changed
+        got = fso.TextFileToString(p, encAutoDetect, nlNoChange)
+        Assert.Exact.AreEqual "x" & vbCrLf & "y" & vbCrLf, got
+
+        ' --- Idempotency / return value ---
+        changed = fso.NormalizeTextFile(p)
+        Assert.Exact.IsFalse changed                             ' already normal -> no-op
+        changed = fso.NormalizeTextFile(p, skipIfUnchanged:=False)
+        Assert.Exact.IsTrue changed                              ' forced rewrite
+
+        ' --- Mixed endings collapse to target with no CR doubling ---
+        Dim pm As String: pm = fso.BuildPath(wf, "norm_mixed.txt")
+        fso.StringToTextFile "a" & vbCrLf & "b" & vbLf & "c" & vbCr & "d", pm, encUtf8, nlNoChange
+        fso.NormalizeTextFile pm
+        got = fso.TextFileToString(pm, encAutoDetect, nlNoChange)
+        Assert.Exact.AreEqual "a" & vbCrLf & "b" & vbCrLf & "c" & vbCrLf & "d", got
+
+        ' --- Encoding conversion: UTF-16 -> UTF-8, content preserved ---
+        Dim p2 As String, sU As String, raw() As Byte, j As Long, hasNul As Boolean
+        p2 = fso.BuildPath(wf, "norm_enc.txt")
+        sU = "caf" & ChrW$(&HE9) & " " & ChrW$(&H4E2D)           ' "café 中"
+        fso.StringToTextFile sU, p2, encUtf16
+        changed = fso.NormalizeTextFile(p2)                      ' -> encUtf8 (default)
+        Assert.Exact.IsTrue changed
+        Assert.Exact.AreEqual sU, fso.TextFileToString(p2)
+        fso.ReadStream p2, raw
+        For j = 0 To UBound(raw)
+            If raw(j) = 0 Then hasNul = True: Exit For
+        Next
+        Assert.Exact.IsFalse hasNul                              ' no NUL bytes after UTF-16 -> UTF-8
+
+        ' --- BOM add / remove ---
+        Dim flag As Boolean
+        fso.NormalizeTextFile p2, toEncoding:=encUtf8Bom
+        fso.ReadStream p2, raw
+        flag = False
+        If UBound(raw) >= 2 Then flag = (raw(0) = &HEF And raw(1) = &HBB And raw(2) = &HBF)
+        Assert.Exact.IsTrue flag                                 ' encUtf8Bom writes a BOM
+        fso.NormalizeTextFile p2, toEncoding:=encUtf8
+        fso.ReadStream p2, raw
+        flag = True
+        If UBound(raw) >= 2 Then flag = Not (raw(0) = &HEF And raw(1) = &HBB And raw(2) = &HBF)
+        Assert.Exact.IsTrue flag                                 ' encUtf8 strips the BOM
+
+        ' --- Empty file is a clean no-op ---
+        Dim pe As String: pe = fso.BuildPath(wf, "norm_empty.txt")
+        fso.StringToTextFile "", pe, encUtf8
+        changed = fso.NormalizeTextFile(pe)
+        Assert.Exact.IsFalse changed
+        Assert.Strict.AreEqual 0&, CLng(fso.GetFile(pe).Size)
+
+        fso.DeleteFolder wf, True
+    End Sub
+
+    Public Sub Test_NormalizeBinaryGuard()
+        Dim fso As New FileSystemObject
+        Dim wf As String: wf = CleanFolder("normbin")
+        Dim p As String: p = fso.BuildPath(wf, "norm_binary.bin")
+
+        Dim b() As Byte
+        ReDim b(0 To 5)
+        b(0) = Asc("h"): b(1) = Asc("i"): b(2) = 0: b(3) = Asc("b"): b(4) = Asc("y"): b(5) = Asc("e")
+        fso.WriteStream b, p
+
+        ' fromEncoding:=encUtf8 forces a non-wide source, so the NUL guard applies.
+        Dim e As Long
+        On Error Resume Next
+        fso.NormalizeTextFile p, fromEncoding:=encUtf8
+        e = Err.Number
+        On Error GoTo 0
+        Assert.Exact.IsTrue (e <> 0)                             ' refuses NUL-bearing content
+
+        fso.DeleteFolder wf, True
+    End Sub
+
+    Public Sub Test_NormalizeAttributes()
+        Dim fso As New FileSystemObject
+        Dim wf As String: wf = CleanFolder("normattr")
+
+        ' Real (non-Normal) settable bits, for "everything cleared" checks.
+        Const REAL_ATTRS As Long = FileAttribute.faReadOnly Or FileAttribute.faHidden Or _
+            FileAttribute.faSystem Or FileAttribute.faArchive Or _
+            FileAttribute.faTemporary Or FileAttribute.faNotContentIndexed
+        Dim p As String, a As Long
+        p = fso.BuildPath(wf, "norm_attr.txt")
+
+        ' (1) PRESERVE: NoChange (default) keeps the source attributes across an atomic
+        '     content rewrite. LF content forces a rewrite; mark read-only ONLY.
+        fso.StringToTextFile "p" & vbLf & "q" & vbLf, p, encUtf8, nlNoChange
+        fso.GetFile(p).Attributes = FileAttribute.ReadOnly
+        Assert.Exact.IsTrue fso.NormalizeTextFile(p)             ' rewrote the read-only file
+        a = fso.GetFile(p).Attributes
+        Assert.Exact.IsTrue ((a And FileAttribute.ReadOnly) <> 0)    ' ReadOnly preserved
+        Assert.Exact.IsTrue ((a And FileAttribute.Archive) = 0)      ' exact set restored (no Archive)
+
+        ' (2) ENFORCE attributes-only delta -> True. Content already normalized.
+        Assert.Exact.IsTrue fso.NormalizeTextFile(p, toAttributes:=FileAttribute.Archive)
+        a = fso.GetFile(p).Attributes
+        Assert.Exact.IsTrue (a = FileAttribute.Archive)             ' exactly Archive
+
+        ' (2b) Immediate re-run, same target, already-matching -> False.
+        Assert.Exact.IsFalse fso.NormalizeTextFile(p, toAttributes:=FileAttribute.Archive)
+
+        ' (3) ENFORCE Normal clears all settable attributes.
+        fso.NormalizeTextFile p, toAttributes:=FileAttribute.ReadOnly
+        Assert.Exact.IsTrue fso.NormalizeTextFile(p, toAttributes:=FileAttribute.Normal)
+        a = fso.GetFile(p).Attributes
+        Assert.Exact.IsTrue ((a And REAL_ATTRS) = 0)               ' all settable cleared
+        Assert.Exact.IsTrue (a = FileAttribute.Normal)             ' reports exactly Normal (0x80)
+
+        fso.GetFile(p).Attributes = FileAttribute.Normal           ' ensure teardown can delete
+        fso.DeleteFolder wf, True
+    End Sub
+
+    '======================================================================
+    ' ============  FILE / FOLDER / DRIVE OBJECT MODEL  ====================
+    '======================================================================
+
+    '----------------------------------------------------------------------
+    ' File: identity + metadata
+    '----------------------------------------------------------------------
+    Public Sub Test_FileObject()
+        Dim fso As New FileSystemObject
+        Dim wf As String: wf = CleanFolder("fileobj")
+        Dim p As String: p = fso.BuildPath(wf, "meta.txt")
+        fso.StringToTextFile "hello world", p, encUtf8              ' 11 ASCII bytes, no BOM
+
+        Dim f As File: Set f = fso.GetFile(p)
+
+        Assert.Exact.AreEqual "meta.txt", f.Name
+        Assert.Exact.AreEqual fso.GetAbsolutePathName(p), f.Path
+        Assert.Exact.AreEqual fso.GetAbsolutePathName(p), (f)         ' File class deafult property
+        Assert.Strict.AreEqual 11&, CLng(f.Size)
+        Assert.Exact.AreEqual fso.GetAbsolutePathName(wf), f.ParentFolder.Path
+        Assert.Exact.AreEqual Left$(fso.GetDriveName(p), 1), f.Drive.DriveLetter
+        Assert.Exact.AreEqual "Text Document", f.Type
+        Assert.Exact.IsTrue f.DateLastModified > 0
+        Assert.Exact.IsTrue f.DateCreated > 0
+
+        ' Missing file should raise (not return an empty object)
+        Dim e As Long
+        On Error Resume Next
+        fso.GetFile fso.BuildPath(wf, "nofile.zzz")
+        e = Err.Number
+        On Error GoTo 0
+        Assert.Strict.AreEqual 53&, CLng(e)
+
+        ' Attributes get/let round-trip through disk
+        Dim a As Long
+        f.Attributes = f.Attributes Or vbReadOnly
+        a = fso.GetFile(p).Attributes
+        Assert.Exact.IsTrue ((a And vbReadOnly) <> 0)
+        f.Attributes = a And Not vbReadOnly
+        a = fso.GetFile(p).Attributes
+        Assert.Exact.IsTrue ((a And vbReadOnly) = 0)
+
+        fso.DeleteFolder wf, True
+    End Sub
+
+    Public Sub Test_FileAttributes()
+        Dim fso As New FileSystemObject
+        Dim wf As String: wf = CleanFolder("fileattr")
+        Dim p As String: p = fso.BuildPath(wf, "attrs.txt")
+        fso.StringToTextFile "x", p, encUtf8
+        Dim a As Long, e As Long
+        Dim f As File: Set f = fso.GetFile(p)
+
+        ' Wholesale set composes multiple attributes
+        f.Attributes = FileAttribute.faReadOnly Or FileAttribute.faHidden
+        a = fso.GetFile(p).Attributes
+        Assert.Exact.IsTrue (((a And FileAttribute.faReadOnly) <> 0) And ((a And FileAttribute.faHidden) <> 0))
+
+        ' RMW clears one bit, leaves the other
+        f.Attributes = a And Not FileAttribute.faHidden
+        a = fso.GetFile(p).Attributes
+        Assert.Exact.IsTrue (((a And FileAttribute.faReadOnly) <> 0) And ((a And FileAttribute.faHidden) = 0))
+
+        ' Clearing the ONLY attribute must actually clear (regression guard for NoChange=-1).
+        f.Attributes = FileAttribute.faReadOnly
+        a = fso.GetFile(p).Attributes
+        Assert.Exact.IsTrue ((a And FileAttribute.Archive) = 0)  ' wholesale set drops Archive
+        f.Attributes = a And Not FileAttribute.faReadOnly          ' mask becomes 0
+        a = fso.GetFile(p).Attributes
+        Assert.Exact.IsTrue ((a And FileAttribute.faReadOnly) = 0)
+
+        ' Normal dominates: ORing Normal with anything clears all settable bits
+        f.Attributes = FileAttribute.faReadOnly
+        f.Attributes = FileAttribute.faReadOnly Or FileAttribute.faNormal
+        a = fso.GetFile(p).Attributes
+        Assert.Exact.IsTrue ((a And FileAttribute.faReadOnly) = 0)
+
+        ' Non-settable bits in the mask are stripped, not errored
+        On Error Resume Next
+        f.Attributes = FileAttribute.faReadOnly Or FileAttribute.faReparsePoint
+        e = Err.Number
+        On Error GoTo 0
+        Assert.Strict.AreEqual 0&, CLng(e)                       ' does not raise
+        a = fso.GetFile(p).Attributes
+        Assert.Exact.IsTrue (((a And FileAttribute.faReadOnly) <> 0) And ((a And FileAttribute.faReparsePoint) = 0))
+
+        fso.GetFile(p).Attributes = FileAttribute.faNormal         ' clear RO so teardown can delete
+        fso.DeleteFolder wf, True
+    End Sub
+
+    Public Sub Test_FileRenameCopyMoveDelete()
+        Dim fso As New FileSystemObject
+        Dim wf As String: wf = CleanFolder("filercmd")
+
+        ' --- rename via .Name ---
+        Dim rp As String: rp = fso.BuildPath(wf, "ren_a.txt")
+        fso.StringToTextFile "x", rp, encUtf8
+        Dim rf As File: Set rf = fso.GetFile(rp)
+        rf.Name = "ren_b.txt"
+        Assert.Exact.IsFalse fso.FileExists(rp)
+        Assert.Exact.IsTrue fso.FileExists(fso.BuildPath(wf, "ren_b.txt"))
+        Assert.Exact.AreEqual "ren_b.txt", rf.Name               ' object re-points
+
+        ' --- Copy ---
+        Dim cp As String, cd As String
+        cp = fso.BuildPath(wf, "cp_src.txt")
+        cd = fso.BuildPath(wf, "cp_dst.txt")
+        fso.StringToTextFile "copyme", cp, encUtf8
+        fso.GetFile(cp).Copy cd
+        Assert.Exact.IsTrue fso.FileExists(cd)
+
+        ' --- Move (object re-points to the new path) ---
+        Dim mp As String, md As String
+        mp = fso.BuildPath(wf, "mv_src.txt")
+        md = fso.BuildPath(wf, "mv_dst.txt")
+        fso.StringToTextFile "moveme", mp, encUtf8
+        Dim mf As File: Set mf = fso.GetFile(mp)
+        mf.Move md
+        Assert.Exact.IsFalse fso.FileExists(mp)
+        Assert.Exact.IsTrue fso.FileExists(md)
+        Assert.Exact.AreEqual fso.GetAbsolutePathName(md), mf.Path
+
+        ' --- Delete ---
+        Dim dp As String: dp = fso.BuildPath(wf, "del.txt")
+        fso.StringToTextFile "bye", dp, encUtf8
+        fso.GetFile(dp).Delete
+        Assert.Exact.IsFalse fso.FileExists(dp)
+
+        fso.DeleteFolder wf, True
+    End Sub
+
+    Public Sub Test_FileOpenAsTextStream()
+        Dim fso As New FileSystemObject
+        Dim wf As String: wf = CleanFolder("fileopen")
+        Dim p As String: p = fso.BuildPath(wf, "stream_read.txt")
+        fso.StringToTextFile "line one and two", p, encUtf8
+
+        Dim ts As TextStream
+        Set ts = fso.GetFile(p).OpenAsTextStream(ForReading)
+        Dim got As String: got = ts.ReadAll()
+        ts.Close
+        Assert.Exact.AreEqual "line one and two", got
+
+        fso.DeleteFolder wf, True
+    End Sub
+
+    '----------------------------------------------------------------------
+    ' Folder: identity + IsRootFolder + ParentFolder
+    '----------------------------------------------------------------------
+    Public Sub Test_FolderObject()
+        Dim fso As New FileSystemObject
+        Dim wf As String: wf = CleanFolder("folderobj")
+        Dim fp As String: fp = fso.BuildPath(wf, "fold")
+        fso.CreateFolder fp
+
+        Dim d As Folder: Set d = fso.GetFolder(fp)
+
+        Assert.Exact.AreEqual "fold", d.Name
+        Assert.Exact.AreEqual fso.GetAbsolutePathName(fp), d.Path
+        Assert.Exact.AreEqual fso.GetAbsolutePathName(fp), (d)        'Folder default Property
+        Assert.Exact.AreEqual fso.GetAbsolutePathName(wf), d.ParentFolder.Path
+        Assert.Exact.IsFalse d.IsRootFolder
+        Assert.Exact.IsTrue d.DateLastModified > 0
+
+        ' Root folder of the working folder's drive
+        Dim rootPath As String
+        rootPath = fso.GetDriveName(fso.GetAbsolutePathName(wf)) & "\"
+        Dim root As Folder: Set root = fso.GetFolder(rootPath)
+        Assert.Exact.IsTrue root.IsRootFolder
+
+        ' Missing folder should raise
+        Dim e As Long
+        On Error Resume Next
+        fso.GetFolder fso.BuildPath(wf, "nofolder")
+        e = Err.Number
+        On Error GoTo 0
+        Assert.Strict.AreEqual 76&, CLng(e)
+
+        fso.DeleteFolder wf, True
+    End Sub
+
+    '----------------------------------------------------------------------
+    ' Folder.Files / Folder.SubFolders: Count, For Each, Item-by-name
+    '----------------------------------------------------------------------
+    Public Sub Test_FolderCollections()
+        Dim fso As New FileSystemObject
+        Dim wf As String: wf = CleanFolder("foldercoll")
+        Dim fp As String: fp = fso.BuildPath(wf, "coll")
+        fso.CreateFolder fp
+        fso.StringToTextFile "a", fso.BuildPath(fp, "a.txt"), encUtf8
+        fso.StringToTextFile "b", fso.BuildPath(fp, "b.txt"), encUtf8
+        fso.StringToTextFile "c", fso.BuildPath(fp, "c.txt"), encUtf8
+        fso.CreateFolder fso.BuildPath(fp, "sub1")
+        fso.CreateFolder fso.BuildPath(fp, "sub2")
+
+        Dim d As Folder: Set d = fso.GetFolder(fp)
+
+        ' --- Files: Count ---
+        Assert.Strict.AreEqual 3&, CLng(d.Files.Count)
+
+        ' --- Files: For Each yields File objects (tests the [DispId(-4)] enumerator) ---
+        Dim itm As File
+        Dim n As Long, bytes As LongLong
+        n = 0: bytes = 0
+        For Each itm In d.Files
+            n = n + 1
+            bytes = bytes + itm.Size
+        Next
+        Assert.Strict.AreEqual 3&, CLng(n)
+        Assert.Strict.AreEqual 3&, CLng(bytes)                   ' 1 byte each
+
+        ' --- Files: Item by name (default member, keyed) ---
+        Assert.Exact.AreEqual "b.txt", d.Files("b.txt").Name
+
+        ' --- SubFolders ---
+        Assert.Strict.AreEqual 2&, CLng(d.SubFolders.Count)
+        Dim subf As Folder                                       ' renamed from 'sub' (keyword)
+        n = 0
+        For Each subf In d.SubFolders
+            n = n + 1
+        Next
+        Assert.Strict.AreEqual 2&, CLng(n)
+        Assert.Exact.AreEqual "sub1", d.SubFolders("sub1").Name
+
+        fso.DeleteFolder wf, True
+    End Sub
+
+    '----------------------------------------------------------------------
+    ' Folder.Size: recursive byte total
+    '----------------------------------------------------------------------
+    Public Sub Test_FolderSize()
+        Dim fso As New FileSystemObject
+        Dim wf As String: wf = CleanFolder("foldersize")
+        Dim fp As String: fp = fso.BuildPath(wf, "sizetree")
+        fso.CreateFolder fp
+        fso.StringToTextFile "aaa", fso.BuildPath(fp, "top.txt"), encUtf8         ' 3 bytes
+        fso.CreateFolder fso.BuildPath(fp, "nested")
+        fso.StringToTextFile "bb", fso.BuildPath(fp, "nested\inner.txt"), encUtf8 ' 2 bytes
+
+        Assert.Strict.AreEqual 5&, CLng(fso.GetFolder(fp).Size)  ' sums files recursively
+
+        fso.DeleteFolder wf, True
+    End Sub
+
+    '----------------------------------------------------------------------
+    ' Folder.CreateTextFile -> writes into the folder, returns a TextStream
+    '----------------------------------------------------------------------
+    Public Sub Test_FolderCreateTextFile()
+        Dim fso As New FileSystemObject
+        Dim wf As String: wf = CleanFolder("folderctf")
+        Dim fp As String: fp = fso.BuildPath(wf, "ctf")
+        fso.CreateFolder fp
+
+        Dim d As Folder: Set d = fso.GetFolder(fp)
+        Dim ts As TextStream
+        Set ts = d.CreateTextFile("made.txt")
+        ts.Write "from folder"
+        ts.Close
+
+        Dim target As String: target = fso.BuildPath(fp, "made.txt")
+        Assert.Exact.IsTrue fso.FileExists(target)
+        Assert.Exact.AreEqual "from folder", fso.TextFileToString(target)
+
+        fso.DeleteFolder wf, True
+    End Sub
+
+    '----------------------------------------------------------------------
+    ' Drive: read-only queries against the system drive
+    '----------------------------------------------------------------------
+    Public Sub Test_DriveObject()
+        Dim fso As New FileSystemObject
+        Dim letter As String
+        letter = Left$(fso.GetSpecialFolder(WindowsFolder), 1)
+
+        Dim dr As Drive: Set dr = fso.GetDrive(letter)
+
+        Assert.Exact.AreEqual UCase$(letter), dr.DriveLetter
+        Assert.Exact.AreEqual UCase$(letter) & ":", dr.Path
+        Assert.Exact.AreEqual UCase$(letter) & ":", (dr)          'Drive Default Property
+        Assert.Exact.IsTrue dr.IsReady
+        Assert.Exact.IsTrue dr.TotalSize > 0
+        Assert.Exact.IsTrue (dr.FreeSpace >= 0 And dr.FreeSpace <= dr.TotalSize)
+        Assert.Exact.IsTrue dr.AvailableSpace <= dr.TotalSize
+        Assert.Exact.IsTrue Len(dr.FileSystem) > 0               ' e.g. NTFS
+
+        ' Environment-tolerant expectations (true on essentially all real setups):
+        Assert.Strict.AreEqual CLng(Fixed), CLng(dr.DriveType)   ' Fixed (2) for system drive
+        Assert.Exact.IsTrue dr.SerialNumber <> 0
+
+        Assert.Exact.IsTrue dr.RootFolder.IsRootFolder
+        Assert.Exact.AreEqual UCase$(letter) & ":\", dr.RootFolder.Path
+    End Sub
+
+    '----------------------------------------------------------------------
+    ' FileSystem.Drives collection
+    '----------------------------------------------------------------------
+    Public Sub Test_DrivesCollection()
+        Dim fso As New FileSystemObject
+        Dim letter As String
+        letter = UCase$(Left$(fso.GetSpecialFolder(WindowsFolder), 1))
+
+        Dim drs As Drives: Set drs = fso.Drives
+        Assert.Exact.IsTrue drs.Count >= 1
+
+        ' For Each yields Drive objects; confirm the system drive is among them
+        Dim dv As Drive
+        Dim found As Boolean: found = False
+        For Each dv In drs
+            If dv.DriveLetter = letter Then found = True
+        Next
+        Assert.Exact.IsTrue found
+
+        ' Item by letter key
+        Assert.Exact.AreEqual letter, drs(letter).DriveLetter
+    End Sub
+
+    '======================================================================
+    ' ===================  FIXTURE / HELPERS  ==============================
+    '   These deliberately avoid the class under test for directory plumbing
+    '   (intrinsics for the root); CleanFolder/CleanupTestDir use the library
+    '   for recursive work, which is fine - those paths are covered elsewhere.
+    '======================================================================
+    Private Function TestDir() As String
+        TestDir = Environ$("TEMP") & "\GeneralTests"
+    End Function
+
+    Private Sub EnsureTestDir()
+        If Len(Dir(TestDir(), vbDirectory)) = 0 Then MkDir TestDir()
+    End Sub
+
+    ' Flat temp file path under the suite root (for file-based tests).
+    Private Function TempPath(ByVal name As String) As String
+        EnsureTestDir
+        TempPath = TestDir() & "\" & name
+    End Function
+
+    ' A guaranteed-empty working subfolder under the suite root (for folder-based
+    ' tests). Robust to leftovers from a prior aborted/individual run.
+    Private Function CleanFolder(ByVal name As String) As String
+        Dim fso As New FileSystemObject
+        EnsureTestDir
+        Dim p As String
+        p = TestDir() & "\" & name
+        If fso.FolderExists(p) Then fso.DeleteFolder p, True
+        fso.CreateFolder p
+        CleanFolder = p
+    End Function
+
+    ' Recursive teardown of the whole suite root (called at the end of RunAllTests).
+    Private Sub CleanupTestDir()
+        On Error Resume Next
+        Dim fso As New FileSystemObject
+        fso.DeleteFolder TestDir(), True
+        On Error GoTo 0
+    End Sub
+
+    ' ASCII string -> bytes (1 byte per char). Use only with code points < 128.
+    Private Function AsciiBytes(ByVal s As String) As Byte()
+        Dim b() As Byte, i As Long
+        If Len(s) = 0 Then Exit Function
+        ReDim b(0 To Len(s) - 1)
+        For i = 1 To Len(s)
+            b(i - 1) = CByte(AscW(Mid$(s, i, 1)) And &HFF)
+        Next
+        AsciiBytes = b
+    End Function
+
+    ' String -> raw UTF-16LE bytes (twinBASIC's native String storage)
+    Private Function Utf16Bytes(ByVal s As String) As Byte()
+        Dim b() As Byte
+        b = s
+        Utf16Bytes = b
+    End Function
+
+    Private Function BytesOf(ParamArray vals() As Variant) As Byte()
+        Dim b() As Byte, i As Long
+        If UBound(vals) < 0 Then Exit Function
+        ReDim b(0 To UBound(vals))
+        For i = 0 To UBound(vals)
+            b(i) = CByte(vals(i))
+        Next
+        BytesOf = b
+    End Function
+
+    Private Function SafeCount(ByRef b() As Byte) As Long
+        If IsArrayInitialized(b) Then SafeCount = UBound(b) + 1
+    End Function
+
+    Private Function Concat(ByRef a() As Byte, ByRef b() As Byte) As Byte()
+        Dim la As Long, lb As Long, r() As Byte, i As Long
+        la = SafeCount(a)
+        lb = SafeCount(b)
+        If la + lb = 0 Then Exit Function
+        ReDim r(0 To la + lb - 1)
+        For i = 0 To la - 1
+            r(i) = a(i)
+        Next
+        For i = 0 To lb - 1
+            r(la + i) = b(i)
+        Next
+        Concat = r
+    End Function
+
+    ' Swap each byte pair in place (UTF-16LE <-> UTF-16BE)
+    Private Sub SwapPairs(ByRef b() As Byte)
+        Dim i As Long, t As Byte
+        If Not IsArrayInitialized(b) Then Exit Sub
+        For i = 0 To UBound(b) - 1 Step 2
+            t = b(i)
+            b(i) = b(i + 1)
+            b(i + 1) = t
+        Next
+    End Sub
+
+    ' Shared multi-script sample (ASCII + Latin + CJK + an astral/emoji codepoint).
+    ' The emoji (U+1F389) is a surrogate pair in UTF-16 and a single unit in UTF-32,
+    ' so it exercises the surrogate paths in the converters.
+    Private Function SampleUnicode() As String
+        SampleUnicode = "ASCII abc 123 " & _
+                        ChrW(&HE9) & "ca" & ChrW(&HFC) & "re " & _
+                        ChrW(&H4E16) & ChrW(&H754C) & " " & _
+                        ChrW(&HD83C&) & ChrW(&HDF89&)
+    End Function
+
+    ' Representable in CP-1252 / Latin-1 (no CJK, no emoji): café résumé naïve ÿ
+    Private Function SampleLatin1() As String
+        SampleLatin1 = "Latin caf" & ChrW(&HE9) & " r" & ChrW(&HE9) & "sum" & _
+                       ChrW(&HE9) & " na" & ChrW(&HEF) & "ve " & ChrW(&HFF)
+    End Function
+    
+    '----------------------------------------------------------------------
+    ' Oracle: do our no-match wildcard error numbers match Scripting.FSO's?
+    ' Drives BOTH implementations with the same no-match wildcard and compares
+    ' the raised Err.Number. Asserts nothing hardcoded — real FSO is the oracle.
+    '----------------------------------------------------------------------
+    Public Sub Test_NoMatchErrorsVsScriptingFSO()
+        Dim ours As New FileSystemObject
+        Dim ref As New Scripting.FileSystemObject
+        Dim wf As String: wf = CleanFolder("nomatch_oracle")
+
+        ' A destination that exists, so the ONLY thing that can raise is the
+        ' unmatched source wildcard (isolates the no-match path from dest checks).
+        Dim dstFiles As String: dstFiles = ours.BuildPath(wf, "dst_files")
+        Dim dstFolders As String: dstFolders = ours.BuildPath(wf, "dst_folders")
+        ours.CreateFolder dstFiles
+        ours.CreateFolder dstFolders
+
+        Dim fileWild As String: fileWild = ours.BuildPath(wf, "nomatch*.zzz")
+        Dim folderWild As String: folderWild = ours.BuildPath(wf, "nofolder*")
+
+        ' ===== CopyFile (file wildcard, no match) =====
+        Dim eOurs As Long, eRef As Long
+
+        eOurs = ErrOf_CopyFile(ours, fileWild, dstFiles)
+        eRef = ErrOf_CopyFile(ref, fileWild, dstFiles)
+        'Debug.Print "CopyFile   no-match: ours=" ; eOurs ; " scripting=" ; eRef
+        Assert.Strict.AreEqual eRef, eOurs
+
+        ' ===== MoveFile (file wildcard, no match) =====
+        eOurs = ErrOf_MoveFile(ours, fileWild, dstFiles)
+        eRef = ErrOf_MoveFile(ref, fileWild, dstFiles)
+        'Debug.Print "MoveFile   no-match: ours=" ; eOurs ; " scripting=" ; eRef
+        Assert.Strict.AreEqual eRef, eOurs
+
+        ' ===== CopyFolder (folder wildcard, no match) =====
+        eOurs = ErrOf_CopyFolder(ours, folderWild, dstFolders)
+        eRef = ErrOf_CopyFolder(ref, folderWild, dstFolders)
+        'Debug.Print "CopyFolder no-match: ours=" ; eOurs ; " scripting=" ; eRef
+        Assert.Strict.AreEqual eRef, eOurs
+
+        ' ===== MoveFolder (folder wildcard, no match) =====
+        eOurs = ErrOf_MoveFolder(ours, folderWild, dstFolders)
+        eRef = ErrOf_MoveFolder(ref, folderWild, dstFolders)
+        'Debug.Print "MoveFolder no-match: ours=" ; eOurs ; " scripting=" ; eRef
+        Assert.Strict.AreEqual eRef, eOurs
+
+        ours.DeleteFolder wf, True
+    End Sub
+
+    ' --- One tiny wrapper per op: run it, capture Err.Number, return 0 if no error.
+    '     Late-bound (As Object) so the SAME wrapper drives both your FSO and
+    '     Scripting.FSO — they share method names, so the calls are identical.
+    Private Function ErrOf_CopyFile(ByVal fso As Object, ByVal source As String, ByVal dest As String) As Long
+        On Error Resume Next
+        fso.CopyFile source, dest
+        ErrOf_CopyFile = Err.Number
+        On Error GoTo 0
+    End Function
+
+    Private Function ErrOf_MoveFile(ByVal fso As Object, ByVal source As String, ByVal dest As String) As Long
+        On Error Resume Next
+        fso.MoveFile source, dest
+        ErrOf_MoveFile = Err.Number
+        On Error GoTo 0
+    End Function
+
+    Private Function ErrOf_CopyFolder(ByVal fso As Object, ByVal source As String, ByVal dest As String) As Long
+        On Error Resume Next
+        fso.CopyFolder source, dest
+        ErrOf_CopyFolder = Err.Number
+        On Error GoTo 0
+    End Function
+
+    Private Function ErrOf_MoveFolder(ByVal fso As Object, ByVal source As String, ByVal dest As String) As Long
+        On Error Resume Next
+        fso.MoveFolder source, dest
+        ErrOf_MoveFolder = Err.Number
+        On Error GoTo 0
+    End Function
+
+End Module

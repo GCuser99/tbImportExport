@@ -1,0 +1,605 @@
+' ==========================================================================
+' NameValidationTests
+'
+' Name validation and error-number parity, with the real
+' Scripting.FileSystemObject as the oracle.
+'
+' The module name undersells it: it began as a case-only rename test and grew
+' into the suite that pins how we behave on names Windows will not accept. It is
+' kept under one roof because every case here is the same question asked of a
+' different member - "given a name the filesystem rejects, do we raise the same
+' number FSO raises?"
+'
+' --- The differential pattern ---------------------------------------------
+' Most tests below run the SAME operation twice, once through this library and
+' once through Scripting.FileSystemObject, and compare Err.Number. That makes
+' the real FSO the specification rather than an assumption about it. Two
+' consequences worth knowing:
+'   * Err.Number = 0 means the operation unexpectedly SUCCEEDED, which is a
+'     result, not a pass - hence the cleanup after every case.
+'   * A failure here usually means FSO does something we did not predict, not
+'     that our code is broken. Read the printed pair before changing anything.
+'
+' --- The three families ---------------------------------------------------
+'   1. CASE-ONLY RENAME. "a.txt" -> "A.TXT" is the same file to Windows, so a
+'      naive existence check treats it as a collision and refuses. Rename allows
+'      it deliberately (see the vbTextCompare guard in FileSystemTools.Rename).
+'      Test_FSO_NameCaching additionally pins that our File object is LIVE: a
+'      case change made out-of-band is visible on the next .Name read, where
+'      FSO's cached object still reports the old casing.
+'
+'   2. BAD-NAME ERROR PARITY. The reserved characters < > : " | ? * , the
+'      reserved device names (CON, PRN...), and trailing dots and spaces.
+'      Checked as a create name (Test_BadNameErrorsVsScriptingFSO), as a
+'      destination (Test_BadNameTargetErrorsVsScriptingFSO, across MoveFile /
+'      CopyFile / MoveFolder / CopyFolder), and through the text writers
+'      (Test_CreateNameErrorsVsScriptingFSO).
+'
+'   3. WILDCARD DESTINATIONS. Test_DestWildcardRejected pins that "*" and "?"
+'      in a destination raise 5 and leave the source untouched - a wildcard
+'      means "many sources", so it can never name one target.
+'
+' --- The subtlety worth reading before editing ----------------------------
+' The colon is the one character where our two write paths DISAGREE, on purpose:
+'
+'   CreateTextFile("notes.txt:meta")        -> succeeds (0)
+'       A colon in a leaf addresses an alternate data stream, and TextStream
+'       writes the target directly, so the write is legal. FSO agrees.
+'
+'   StringToTextFile / ArrayToTextFile      -> raise 52
+'       These go through WriteStream's atomic temp-swap, which builds
+'       "<path>.~XXXX.tmp" - a name an ADS path cannot survive. Rejecting up
+'       front gives a clean 52 instead of an opaque failure at Open.
+'
+' That is why FileSystemTools.GuardWriteName and TextStream.GuardCreateName
+' differ by exactly one character. Test_CreateNameErrorsVsScriptingFSO encodes
+' both expectations; if you "fix" the asymmetry, this is what will tell you.
+'
+' --- Probe_* vs Test_* ----------------------------------------------------
+' Test_* asserts. Probe_* PRINTS and asserts nothing - each one was written to
+' find out what Windows or FSO actually does, and is kept because its output is
+' where the Test_* expectations came from. Probe_BadNameWin32Error deliberately
+' bypasses GetAbsolutePathName so it sees CreateDirectoryW's own error rather
+' than the resolver's transformation of it.
+'
+' Every test builds its fixture under %TEMP% via CleanFolder and removes it
+' afterwards, so the subs are independent and the order in RunAll is
+' presentational only.
+'
+' Run TestRenameCase.RunAll, or let TestSuite.RunFast call it.
+'
+' NOTE: two leftovers are deliberately NOT in RunAll - test_illegal (scratch
+' exploration, half commented out) and the Private CaseOnlyRename_ChangesDiskCasing
+' (superseded by Probe_CaseOnlyMove and currently unreferenced). Both are
+' candidates for deletion before publishing.
+' ==========================================================================
+Private Module NameValidationTests
+    
+    '======================================================================
+    ' Entry point
+    '
+    ' Every sub below is independent and self-cleaning, so the order here is
+    ' presentational rather than load-bearing. Probe_* subs print findings
+    ' instead of asserting - they were written to discover what the real FSO
+    ' does, and are kept because that behaviour is what the parity tests encode.
+    '======================================================================
+    Public Sub RunAll()
+        Test_FSO_NameCaching
+        Test_BadNameErrorsVsScriptingFSO
+        Test_BadNameTargetErrorsVsScriptingFSO
+        Test_DestWildcardRejected
+        Test_CreateNameErrorsVsScriptingFSO
+        Probe_CaseOnlyMove
+        Probe_BadNameWin32Error
+    End Sub
+
+    ' Best-effort delete; never throws.
+    Private Sub QuietKill(ByVal path As String)
+        On Error Resume Next
+        Kill path
+        On Error GoTo 0
+    End Sub
+
+    Private Sub RealCollision_StillRaises58()
+        ' Guards the change we made: a genuine collision must still raise,
+        ' i.e. skipping the exists-check for the source didn't disable it.
+        Dim dir As String
+        dir = FileSystemTools.GetAbsolutePathName(Environ$("TEMP"))
+        Dim aPath As String, bPath As String
+        aPath = FileSystemTools.BuildPath(dir, "collide_a.tmp")
+        bPath = FileSystemTools.BuildPath(dir, "collide_b.tmp")
+
+        QuietKill aPath: QuietKill bPath
+        Dim fn As Integer
+        fn = FreeFile: Open aPath For Output As #fn: Close #fn
+        fn = FreeFile: Open bPath For Output As #fn: Close #fn
+
+        Dim errNo As Long
+        On Error Resume Next
+        FileSystemTools.Rename aPath, "collide_b.tmp"   ' target already exists
+        errNo = Err.Number
+        On Error GoTo 0
+
+        QuietKill aPath: QuietKill bPath
+        Assert.Permissive.AreEqual 58, errNo, "A real name collision should raise error 58"
+    End Sub
+    
+    Public Sub Probe_CaseOnlyMove()
+        Dim d As String
+        d = Environ$("TEMP")
+        Dim lo As String, up As String
+        lo = d & "\probe_case.tmp"
+        up = d & "\PROBE_CASE.TMP"
+
+        On Error Resume Next
+        Kill lo: Kill up
+        On Error GoTo 0
+
+        Dim fn As Integer
+        fn = FreeFile
+        Open lo For Output As #fn
+        Close #fn
+
+        Debug.Print "before: " ; MoveFileExW(StrPtr(lo), StrPtr(up), 0), Err.LastDllError
+    End Sub
+    
+    Public Sub Test_FSO_NameCaching()
+        Dim fso As New FileSystemObject
+        Dim wf As String: wf = fso.BuildPath(Environ$("TEMP"), "fsocache")
+        On Error Resume Next: fso.DeleteFolder wf, True: On Error GoTo 0
+        fso.CreateFolder wf
+
+        Dim p As String: p = fso.BuildPath(wf, "cachetest.txt")
+        fso.CreateTextFile(p).Close
+
+        ' Grab a File object, read .Name once to force any lazy load
+        Dim f As File
+        Set f = fso.GetFile(p)
+        Dim before As String: before = f.Name          ' "cachetest.txt"
+
+        ' Rename on disk, OUT-OF-BAND (via a different call, not through f)
+        Name p As fso.BuildPath(wf, "CACHETEST.TXT")   ' case-only, same file
+
+        ' Re-read .Name on the SAME object. Does it see the new casing?
+        Dim after As String: after = f.Name
+
+        Debug.Print "before      : " ; before
+        Debug.Print "after       : " ; after
+        Debug.Print "Dir (truth) : " ; Dir$(fso.BuildPath(wf, "cachetest.txt"))
+        Debug.Print "-> " ; IIf(StrComp(after, "CACHETEST.TXT", vbBinaryCompare) = 0, _
+                              "LIVE (re-reads disk)", "CACHED (snapshot at GetFile)")
+        fso.DeleteFile p
+
+        fso.DeleteFolder wf, True
+    End Sub
+    
+    '----------------------------------------------------------------------
+    ' Oracle: do our "bad name" error numbers match Scripting.FSO's?
+    ' Real FSO is the oracle. Each probe runs the SAME op on both implementations
+    ' and compares Err.Number (0 = the op unexpectedly SUCCEEDED). Because some
+    ' inputs may succeed in one impl, every probe cleans up any artifact it made.
+    '----------------------------------------------------------------------
+    Public Sub Test_BadNameErrorsVsScriptingFSO()
+        Dim ours As New FileSystemObject
+        Dim ref As New Scripting.FileSystemObject
+        Dim wf As String: wf = CleanFolder("badname_oracle")
+
+        ' Each case: a leaf name to attempt under wf. We compare CreateFolder
+        ' behavior (a create-only op that surfaces name validation directly).
+        ' Add/remove cases freely; the pipe char is the canonical "52" trigger.
+        Dim cases() As String
+        cases = Array( _
+            "bad|pipe", _
+            "bad<lt", _
+            "bad>gt", _
+            "bad" & Chr$(34) & "quote", _
+            "bad:colon", _
+            "bad?q", _
+            "bad*star", _
+            "CON", _
+            "PRN", _
+            "trailingdot.", _
+            "trailingspace ")
+
+        Dim i As Long
+        For i = LBound(cases) To UBound(cases)
+            Dim leaf As String: leaf = cases(i)
+            Dim eOurs As Long, eRef As Long
+
+            eOurs = ErrOf_CreateFolder(ours, ours.BuildPath(wf, leaf))
+            CleanupFolderQuiet ours, ours.BuildPath(wf, leaf)     ' remove if it got made
+
+            eRef = ErrOf_CreateFolder(ref, JoinPathRef(wf, leaf))
+            CleanupFolderQuiet ours, ours.BuildPath(wf, leaf)     ' ref may have made it too
+
+            Debug.Print "CreateFolder [" ; leaf ; "]  ours=" ; eOurs ; " scripting=" ; eRef
+
+            ' The real assertion: we match FSO's number (including 0 == both succeed).
+            Assert.Strict.AreEqual eRef, eOurs
+        Next
+
+        ours.DeleteFolder wf, True
+    End Sub
+
+    ' Run CreateFolder, capture Err.Number (0 if it succeeded). Late-bound so the
+    ' SAME wrapper drives both your FSO and Scripting.FSO.
+    'Private Function ErrOf_CreateFolder(ByVal fso As Object, ByVal path As String) As Long
+    '    On Error Resume Next
+    '    fso.CreateFolder path
+    '    ErrOf_CreateFolder = Err.Number
+    '    On Error GoTo 0
+    'End Function
+
+    ' Best-effort remove; never throws, never asserts. Uses OUR fso for both,
+    ' since a real path made by either impl is the same path on disk.
+    Private Sub CleanupFolderQuiet(ByVal fso As Object, ByVal path As String)
+        On Error Resume Next
+        fso.DeleteFolder path, True
+        On Error GoTo 0
+    End Sub
+
+    ' Scripting.FSO's BuildPath is available too, but to keep the compared INPUT
+    ' identical we build the ref path the same way our BuildPath would, by hand.
+    Private Function JoinPathRef(ByVal folder As String, ByVal leaf As String) As String
+        If Right$(folder, 1) = "\" Then
+            JoinPathRef = folder & leaf
+        Else
+            JoinPathRef = folder & "\" & leaf
+        End If
+    End Function
+    
+    ' Returns a fresh, empty working folder under TEMP for a test to use as its
+    ' sandbox. Removes any leftover from a previous run so tests are repeatable.
+    ' Takes no fso dependency (standalone), building its own.
+    Private Function CleanFolder(ByVal label As String) As String
+        Dim fso As New FileSystemObject
+        Dim base As String
+        base = fso.BuildPath(fso.GetSpecialFolder(sfTemporaryFolder), "tbFileSysTools_tests")
+        Dim path As String
+        path = fso.BuildPath(base, label)
+
+        On Error Resume Next
+        fso.DeleteFolder path, True          ' wipe any prior run (ignore if absent)
+        On Error GoTo 0
+
+        If Not fso.FolderExists(base) Then fso.CreateFolder base, createIntermediates:=True   ' ensure the parent exists
+        On Error Resume Next
+        fso.CreateFolder base                ' harmless if it already existed
+        On Error GoTo 0
+        fso.CreateFolder path                ' fresh empty sandbox
+        CleanFolder = fso.GetAbsolutePathName(path)
+    End Function
+    
+    Public Sub Probe_BadNameWin32Error()
+        Dim base As String
+        base = Environ$("TEMP")
+
+        ' Build the paths by hand — do NOT route through GetAbsolutePathName,
+        ' so we see the API's own error, not your resolver's transformation.
+        Dim pipePath As String:  pipePath = base & "\bad|pipe"
+        Dim colonPath As String: colonPath = base & "\bad:colon"
+        Dim starPath As String:  starPath = base & "\bad*star"
+        Dim goodPath As String:  goodPath = base & "\probe_ok_delete_me"
+
+        Dim rc As Long
+
+        ' --- pipe ---
+        SetLastError 0
+        rc = CreateDirectoryW(StrPtr(pipePath), ByVal vbNullPtr)
+        Debug.Print "pipe   rc=" ; rc ; " LastDllError=" ; Err.LastDllError
+
+        ' --- colon ---
+        SetLastError 0
+        rc = CreateDirectoryW(StrPtr(colonPath), ByVal vbNullPtr)
+        Debug.Print "colon  rc=" ; rc ; " LastDllError=" ; Err.LastDllError
+
+        ' --- star ---
+        SetLastError 0
+        rc = CreateDirectoryW(StrPtr(starPath), ByVal vbNullPtr)
+        Debug.Print "star   rc=" ; rc ; " LastDllError=" ; Err.LastDllError
+
+        ' --- control: a VALID name, should succeed (rc<>0, LastDllError=0) ---
+        SetLastError 0
+        rc = CreateDirectoryW(StrPtr(goodPath), ByVal vbNullPtr)
+        Debug.Print "good   rc=" ; rc ; " LastDllError=" ; Err.LastDllError
+        If rc <> 0 Then RemoveDirectoryW StrPtr(goodPath)   ' clean up the one that worked
+    End Sub
+    
+    '----------------------------------------------------------------------
+    ' Oracle: bad-NAME target parity across Move/Copy ops (not just CreateFolder).
+    ' Each op needs a valid source, so we build one, attempt the op to a
+    ' bad-named destination, compare Err.Number vs Scripting.FSO, then clean up.
+    ' Reserved chars (| < > " ? *) should map to 52; ':' to 76 (per CreateFolder run).
+    '----------------------------------------------------------------------
+    Public Sub Test_BadNameTargetErrorsVsScriptingFSO()
+        Dim ours As New FileSystemObject
+        Dim ref As New Scripting.FileSystemObject
+        Dim wf As String: wf = CleanFolder("badname_target_oracle")
+        Dim bad() As String
+        bad = Array("bad|pipe", "bad<lt", "bad>gt", "bad" & Chr$(34) & "q", _
+                    "bad:colon", "bad?q", "bad*star")
+        Dim i As Long, uid As Long
+        For i = LBound(bad) To UBound(bad)
+            Dim leaf As String: leaf = bad(i)
+            uid = uid + 1: CompareOp ours, ref, wf, "MoveFile", leaf, uid
+            uid = uid + 1: CompareOp ours, ref, wf, "CopyFile", leaf, uid
+            uid = uid + 1: CompareOp ours, ref, wf, "MoveFolder", leaf, uid
+            uid = uid + 1: CompareOp ours, ref, wf, "CopyFolder", leaf, uid
+        Next
+        ours.DeleteFolder wf, True
+    End Sub
+
+    ' Runs one op on both implementations with a freshly-built valid source and a
+    ' bad-named destination, prints both error numbers, asserts they match.
+    Private Sub CompareOp(ByVal ours As Object, ByVal ref As Object, ByVal wf As String, _
+                          ByVal op As String, ByVal badLeaf As String, ByVal uid As Long)
+        ' Unique per call — uid guarantees no collision even when SafeTag collapses
+        ' two different bad leaves to the same stripped string.
+        Dim tag As String: tag = op & "_" & CStr(uid)
+        Dim cell As String: cell = ours.BuildPath(wf, tag)
+        ours.CreateFolder cell
+
+        Dim badDest As String: badDest = ours.BuildPath(cell, badLeaf)
+
+        Dim eOurs As Long, eRef As Long
+        eOurs = RunOp(ours, op, cell, badDest)
+        CleanupQuiet ours, badDest            ' remove artifact if the op somehow created one
+        eRef = RunOp(ref, op, cell, badDest)
+        CleanupQuiet ours, badDest
+
+        Debug.Print PadRight(op, 11) ; " [" ; badLeaf ; "]  ours=" ; eOurs ; " scripting=" ; eRef
+        Assert.Strict.AreEqual eRef, eOurs
+    End Sub
+
+    ' Builds a valid source inside 'cell', then runs op source -> badDest.
+    ' Returns Err.Number (0 = op unexpectedly succeeded). Late-bound so ONE
+    ' function drives both your FSO and Scripting.FSO.
+    Private Function RunOp(ByVal fso As Object, ByVal op As String, _
+                           ByVal cell As String, ByVal badDest As String) As Long
+        On Error Resume Next
+        Select Case op
+            Case "MoveFile", "CopyFile"
+                Dim fSrc As String: fSrc = fso.BuildPath(cell, "src.txt")
+                If Not fso.FileExists(fSrc) Then fso.CreateTextFile(fSrc).Close
+                If op = "MoveFile" Then
+                    fso.MoveFile fSrc, badDest
+                Else
+                    fso.CopyFile fSrc, badDest
+                End If
+
+            Case "MoveFolder", "CopyFolder"
+                Dim dSrc As String: dSrc = fso.BuildPath(cell, "srcdir")
+                If Not fso.FolderExists(dSrc) Then fso.CreateFolder dSrc
+                If op = "MoveFolder" Then
+                    fso.MoveFolder dSrc, badDest
+                Else
+                    fso.CopyFolder dSrc, badDest
+                End If
+        End Select
+        RunOp = Err.Number
+        On Error GoTo 0
+    End Function
+
+    Private Sub CleanupQuiet(ByVal fso As Object, ByVal path As String)
+        On Error Resume Next
+        fso.DeleteFile path, True
+        fso.DeleteFolder path, True
+        On Error GoTo 0
+    End Sub
+
+    ' Turn a bad leaf into something usable as a folder name for the sandbox tag
+    ' (strip the very illegal chars we're testing so the sandbox itself is valid).
+    Private Function SafeTag(ByVal s As String) As String
+        Dim r As String, i As Long, ch As String
+        For i = 1 To Len(s)
+            ch = Mid$(s, i, 1)
+            If InStr("|<>""" & ":?*", ch) = 0 Then r = r & ch
+        Next
+        SafeTag = r
+    End Function
+
+    Private Function PadRight(ByVal s As String, ByVal n As Long) As String
+        If Len(s) >= n Then PadRight = s Else PadRight = s & Space$(n - Len(s))
+    End Function
+    
+    '----------------------------------------------------------------------
+    ' Destination wildcards are rejected with error 5 (FSO parity), independent
+    ' of whether the source has wildcards. Does not depend on Scripting.FSO.
+    '----------------------------------------------------------------------
+    Public Sub Test_DestWildcardRejected()
+        Dim fso As New FileSystemObject
+        Dim wf As String: wf = CleanFolder("destwild")
+        Dim e As Long
+
+        ' Valid sources to attempt moving/copying to a wildcard destination.
+        Dim fSrc As String: fSrc = fso.BuildPath(wf, "src.txt")
+        fso.CreateTextFile(fSrc).Close
+        Dim dSrc As String: dSrc = fso.BuildPath(wf, "srcdir")
+        fso.CreateFolder dSrc
+
+        Dim starDest As String: starDest = fso.BuildPath(wf, "out*")
+        Dim qDest As String: qDest = fso.BuildPath(wf, "out?")
+
+        ' --- MoveFile ---
+        On Error Resume Next
+        fso.MoveFile fSrc, starDest
+        e = Err.Number
+        On Error GoTo 0
+        Assert.Strict.AreEqual 5&, CLng(e)
+        Assert.Exact.IsTrue fso.FileExists(fSrc)          ' source untouched
+
+        ' --- CopyFile ---
+        On Error Resume Next
+        fso.CopyFile fSrc, qDest
+        e = Err.Number
+        On Error GoTo 0
+        Assert.Strict.AreEqual 5&, CLng(e)
+
+        ' --- MoveFolder ---
+        On Error Resume Next
+        fso.MoveFolder dSrc, starDest
+        e = Err.Number
+        On Error GoTo 0
+        Assert.Strict.AreEqual 5&, CLng(e)
+        Assert.Exact.IsTrue fso.FolderExists(dSrc)        ' source untouched
+
+        ' --- CopyFolder ---
+        On Error Resume Next
+        fso.CopyFolder dSrc, qDest
+        e = Err.Number
+        On Error GoTo 0
+        Assert.Strict.AreEqual 5&, CLng(e)
+
+        ' --- Wildcards in BOTH source and dest -> still the DEST error (5), not
+        '     source-walker processing. Guard order matters. ---
+        On Error Resume Next
+        fso.CopyFile fso.BuildPath(wf, "*.txt"), starDest
+        e = Err.Number
+        On Error GoTo 0
+        Assert.Strict.AreEqual 5&, CLng(e)
+
+        fso.DeleteFolder wf, True
+    End Sub
+    
+    '----------------------------------------------------------------------
+    ' Oracle/measurement: CreateFolder + text-file creators vs Scripting.FSO,
+    ' for bad-char and wildcard NAMES. Prints both error numbers per case.
+    ' Asserts parity for CreateFolder (already guarded). For the text creators
+    ' it PRINTS but does not assert — run it to discover FSO's behavior, then
+    ' decide whether to guard.
+    '----------------------------------------------------------------------
+    '----------------------------------------------------------------------
+    ' Oracle/measurement: CreateFolder + all text writers vs Scripting.FSO,
+    ' for bad-char and wildcard NAMES. CreateFolder is ASSERTED (guarded).
+    ' The text writers are MEASURED (printed with MATCH/DIFFERS) — run to
+    ' discover behavior before deciding whether each needs a guard.
+    '
+    ' NOTE: Scripting.FSO has no StringToTextFile/ArrayToTextFile. For those
+    ' rows the "oracle" is the KNOWN-GOOD target: bad chars should be 52,
+    ' ':' should succeed (0) as an ADS write. We compare against those
+    ' constants, not against ref. Rows are labeled so it's unambiguous.
+    '----------------------------------------------------------------------
+    '----------------------------------------------------------------------
+    ' Oracle/measurement: CreateFolder + text creators/writers vs Scripting.FSO,
+    ' for bad-char and wildcard NAMES.
+    '
+    ' Parity contract (all ASSERTED now):
+    '   CreateFolder    : bad chars -> 52 ; ':' -> 76 ; wildcards -> 52 (name context)
+    '   CreateTextFile  : bad chars -> 52 ; ':' -> 0  (direct write = valid ADS, matches FSO)
+    '   StringToTextFile: bad chars -> 52 ; ':' -> 52 (temp-swap can't do ADS; Option A)
+    '   ArrayToTextFile : same as StringToTextFile
+    '----------------------------------------------------------------------
+    Public Sub Test_CreateNameErrorsVsScriptingFSO()
+        Dim ours As New FileSystemObject
+        Dim ref As New Scripting.FileSystemObject
+        Dim wf As String: wf = CleanFolder("createname_oracle")
+
+        Dim bad() As String
+        bad = Array("bad|pipe", "bad<lt", "bad*star", "bad?q", "bad:colon")
+
+        Dim i As Long, uid As Long
+        For i = LBound(bad) To UBound(bad)
+            Dim leaf As String: leaf = bad(i)
+            Dim isColon As Boolean: isColon = (InStr(leaf, ":") > 0)
+
+            ' Direct-write path (CreateTextFile): colon is a valid ADS write -> 0.
+            Dim expectDirect As Long: expectDirect = IIf(isColon, 0&, 52&)
+            ' Temp-swap writers (String/ArrayToTextFile): colon rejected -> 52 (Option A).
+            Dim expectWriter As Long: expectWriter = 52&
+
+            ' --- CreateFolder: ASSERTED against real FSO ---
+            uid = uid + 1
+            Dim cfOurs As Long, cfRef As Long
+            Dim cO As String: cO = ours.BuildPath(wf, "cf_o_" & uid)
+            Dim cR As String: cR = ours.BuildPath(wf, "cf_r_" & uid)
+            ours.CreateFolder cO: ours.CreateFolder cR
+            cfOurs = ErrOf_CreateFolder(ours, ours.BuildPath(cO, leaf))
+            CleanupQuiet ours, ours.BuildPath(cO, leaf)
+            cfRef = ErrOf_CreateFolder(ref, ours.BuildPath(cR, leaf))
+            CleanupQuiet ours, ours.BuildPath(cR, leaf)
+            Debug.Print "CreateFolder    [" ; leaf ; "]  ours=" ; cfOurs ; " scripting=" ; cfRef ; _
+                        IIf(cfOurs = cfRef, "   MATCH", "   <-- DIFFERS")
+            Assert.Strict.AreEqual cfRef, cfOurs
+
+            ' --- CreateTextFile: ASSERTED against real FSO (direct write) ---
+            uid = uid + 1
+            Dim ctOurs As Long, ctRef As Long
+            Dim tO As String: tO = ours.BuildPath(wf, "ct_o_" & uid)
+            Dim tR As String: tR = ours.BuildPath(wf, "ct_r_" & uid)
+            ours.CreateFolder tO: ours.CreateFolder tR
+            ctOurs = ErrOf_CreateTextFile(ours, ours.BuildPath(tO, leaf))
+            CleanupQuiet ours, ours.BuildPath(tO, leaf)
+            ctRef = ErrOf_CreateTextFile(ref, ours.BuildPath(tR, leaf))
+            CleanupQuiet ours, ours.BuildPath(tR, leaf)
+            Debug.Print "CreateTextFile  [" ; leaf ; "]  ours=" ; ctOurs ; " scripting=" ; ctRef ; _
+                        IIf(ctOurs = ctRef, "   MATCH", "   <-- DIFFERS")
+            Assert.Strict.AreEqual ctRef, ctOurs
+            ' Also confirm it matches the intended direct-write contract.
+            Assert.Strict.AreEqual expectDirect, ctOurs
+
+            ' --- StringToTextFile: ASSERTED against Option A contract (no ref equiv) ---
+            uid = uid + 1
+            Dim stOurs As Long
+            Dim sO As String: sO = ours.BuildPath(wf, "st_o_" & uid)
+            ours.CreateFolder sO
+            stOurs = ErrOf_StringToTextFile(ours, ours.BuildPath(sO, leaf))
+            CleanupQuiet ours, ours.BuildPath(sO, leaf)
+            Debug.Print "StringToTextFile[" ; leaf ; "]  ours=" ; stOurs ; " expect=" ; expectWriter ; _
+                        IIf(stOurs = expectWriter, "   MATCH", "   <-- DIFFERS")
+            Assert.Strict.AreEqual expectWriter, stOurs
+
+            ' --- ArrayToTextFile: ASSERTED against Option A contract ---
+            uid = uid + 1
+            Dim atOurs As Long
+            Dim aO As String: aO = ours.BuildPath(wf, "at_o_" & uid)
+            ours.CreateFolder aO
+            atOurs = ErrOf_ArrayToTextFile(ours, ours.BuildPath(aO, leaf))
+            CleanupQuiet ours, ours.BuildPath(aO, leaf)
+            Debug.Print "ArrayToTextFile [" ; leaf ; "]  ours=" ; atOurs ; " expect=" ; expectWriter ; _
+                        IIf(atOurs = expectWriter, "   MATCH", "   <-- DIFFERS")
+            Assert.Strict.AreEqual expectWriter, atOurs
+
+            Debug.Print "----"
+        Next
+
+        ours.DeleteFolder wf, True
+    End Sub
+
+    Private Function ErrOf_CreateFolder(ByVal fso As Object, ByVal path As String) As Long
+        On Error Resume Next
+        fso.CreateFolder path
+        ErrOf_CreateFolder = Err.Number
+        On Error GoTo 0
+    End Function
+
+    Private Function ErrOf_CreateTextFile(ByVal fso As Object, ByVal path As String) As Long
+        Dim ts As Object
+        On Error Resume Next
+        Set ts = fso.CreateTextFile(path)
+        ErrOf_CreateTextFile = Err.Number
+        If Not ts Is Nothing Then ts.Close
+        On Error GoTo 0
+    End Function
+
+    ' Ours-only (Scripting.FSO has no equivalent): typed FileSystemObject.
+    Private Function ErrOf_StringToTextFile(ByVal fso As FileSystemObject, ByVal path As String) As Long
+        On Error Resume Next
+        fso.StringToTextFile "probe", path, encUtf8
+        ErrOf_StringToTextFile = Err.Number
+        On Error GoTo 0
+    End Function
+
+    Private Function ErrOf_ArrayToTextFile(ByVal fso As FileSystemObject, ByVal path As String) As Long
+        Dim lines(0 To 1) As String
+        lines(0) = "a": lines(1) = "b"
+        On Error Resume Next
+        fso.ArrayToTextFile lines, path, encUtf8, nlWindows
+        ErrOf_ArrayToTextFile = Err.Number
+        On Error GoTo 0
+    End Function
+    
+
+
+End Module
+
+

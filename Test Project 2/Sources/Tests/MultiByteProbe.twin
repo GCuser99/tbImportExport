@@ -1,0 +1,413 @@
+' ==========================================================================
+' MultiByteProbe (Phase E)
+'
+' The gaps left by LargeFileProbe / AppendProbe, all of which used pure ASCII:
+'
+'   1. MULTI-BYTE AT SCALE. The carry buffer (mCarry / CompletePrefixLen) is the
+'      most intricate machinery in TextStream and has never run on a large file.
+'      Here it runs across ~19 MILLION chunk boundaries.
+'   2. THE TEXTSTREAM READ PATH PAST 2GB. Phase C read the big file with raw
+'      Binary Get. TextStream.ReadLine - and the LongLong mBytesRemaining that
+'      feeds it - has never actually been executed past 2^31.
+'   3. SURROGATE PAIRS SPLIT BY A CHUNK BOUNDARY. Utf16PrefixLen holds back a
+'      lone high surrogate precisely for this, and it has never been provoked.
+'
+' HOW (3) IS GUARANTEED, not merely hoped for:
+'   Each line is 63 UTF-16 code units = 126 bytes. Chunks are 65536 bytes.
+'   gcd(126, 65536) = 2, so as the file advances, the chunk boundary lands on
+'   EVERY even byte offset within a line - all 63 code-unit positions. The
+'   surrogate pair therefore WILL be straddled, many times over. The same holds
+'   for the 4-byte UTF-8 form of the same character.
+'
+' Each line carries an 8-digit counter, so a single dropped, duplicated or
+' mis-decoded character shows up immediately as a counter mismatch rather than
+' as a vague "file looks wrong".
+'
+' Runtime: several minutes per encoding (~19M ReadLine calls for UTF-16,
+' ~35M for UTF-8). Needs ~5 GB free. Run E1 and E2 separately if you prefer.
+' ==========================================================================
+
+Private Module MultiByteProbe
+    Option Explicit
+
+    Private Const TARGET_BYTES As LongLong = 2400000000^        ' comfortably past 2^31
+    Private Const LINES_PER_BLOCK As Long = 1000                ' write granularity
+
+    ' Line = 61 content units + CRLF = 63 units.
+    ' Content: 8-digit counter | U+1F600 (surrogate pair) | e-acute | CJK | 49 x 'x'
+    Private Const CONTENT_UNITS As Long = 61
+
+    Private mPath As String
+    Private mPassed As Long
+    Private mFailed As Long
+
+    Public Sub RunAll()
+        mPassed = 0
+        mFailed = 0
+        Debug.Print "=== Phase E: multi-byte encodings past 2GB ==="
+        E1_Utf16LE
+        E2_Utf8
+        Debug.Print vbCrLf & "=== " & mPassed & " passed, " & mFailed & " failed ==="
+    End Sub
+
+    '======================================================================
+    ' E1 - UTF-16LE + BOM. 2 bytes/unit, 4 for the astral char.
+    ' The encoding whose chunk boundaries are most likely to split a character.
+    '======================================================================
+    Public Sub E1_Utf16LE()
+        Debug.Print vbCrLf & "--- E1: UTF-16LE + BOM ---"
+        RoundTrip TempPath("_probe_u16.txt"), encUtf16Bom, 126   ' 63 units x 2 bytes
+    End Sub
+
+    '======================================================================
+    ' E2 - UTF-8 + BOM. Variable width: 1/2/3/4 bytes per character in the SAME
+    ' line, which is what exercises Utf8PrefixLen's walk-back properly.
+    '   8 ASCII + 4 (U+1F600) + 2 (e-acute) + 3 (CJK) + 49 ASCII + 2 (CRLF) = 68
+    '======================================================================
+    Public Sub E2_Utf8()
+        Debug.Print vbCrLf & "--- E2: UTF-8 + BOM ---"
+        RoundTrip TempPath("_probe_u8.txt"), encUtf8Bom, 68
+    End Sub
+
+    '======================================================================
+    ' Write a >2GB file in the given encoding, then read every line back through
+    ' TextStream and verify it. bytesPerLine is used only to size the run.
+    '======================================================================
+    Private Sub RoundTrip(ByVal path As String, ByVal enc As TextEncoding, ByVal bytesPerLine As Long)
+        Dim totalLines As LongLong
+        totalLines = (TARGET_BYTES \ bytesPerLine) + 1
+        Debug.Print "  Target: ~" & totalLines & " lines, ~" & _
+                    Format$((totalLines * bytesPerLine) / 1073741824#, "0.00") & " GB"
+
+        If Not WritePhase(path, enc, totalLines) Then Exit Sub
+        ReadPhase path, enc, totalLines
+        Debug.Print "  (leaving " & path & " in place; call CleanUp when done)"
+    End Sub
+
+    Private Function WritePhase(ByVal path As String, ByVal enc As TextEncoding, _
+                                ByVal totalLines As LongLong) As Boolean
+        Dim ts As TextStream
+        Dim t0 As Double, lineNo As LongLong
+        On Error GoTo Failed
+
+        t0 = Timer
+        FileSystemTools.DeleteFile path, True, True
+        Set ts = FileSystemTools.CreateTextFile(path, True, enc, nlWindows)
+        Check "E write IsStreaming", ts.IsStreaming, "True", CStr(ts.IsStreaming)
+
+        lineNo = 1
+        Do While lineNo <= totalLines
+            ts.Write BuildBlock(lineNo, totalLines)
+            lineNo = lineNo + LINES_PER_BLOCK
+        Loop
+        ts.Close
+        Set ts = Nothing
+
+        Dim size As LongLong
+        size = FileSize(path)
+        Debug.Print "  Wrote " & size & " bytes in " & Format$(Timer - t0, "0.0") & "s"
+        Check "E file exceeds 2GB", (size > 2147483647^), ">2147483647", CStr(size)
+
+        WritePhase = True
+        Exit Function
+    Failed:
+        Fail "write raised " & Err.Number & " - " & Err.Description
+        On Error Resume Next
+        If Not ts Is Nothing Then ts.Close
+    End Function
+
+    ' The real test. Every line is checked, not sampled: a single character
+    ' dropped or duplicated at ANY of the ~19M chunk boundaries shifts the
+    ' counter and is caught on the very next line.
+    Private Sub ReadPhase(ByVal path As String, ByVal enc As TextEncoding, ByVal totalLines As LongLong)
+        Dim ts As TextStream
+        Dim t0 As Double
+        Dim n As LongLong, bad As LongLong
+        Dim s As String
+        On Error GoTo Failed
+
+        t0 = Timer
+        Set ts = FileSystemTools.OpenTextFile(path, ForReading)   ' encAutoDetect: BOM must win
+
+        Check "E read IsStreaming", ts.IsStreaming, "True", CStr(ts.IsStreaming)
+        Check "E encoding auto-detected", (ts.Encoding = enc), CStr(enc), CStr(ts.Encoding)
+
+        ' The BOM must have been skipped at open: if it leaked into the text, the
+        ' first line would start with U+FEFF and the counter check would fail here.
+        Do While Not ts.AtEndOfStream
+            s = ts.ReadLine()
+            n = n + 1
+            If Not LineIsValid(s, n) Then
+                bad = bad + 1
+                If bad <= 5 Then
+                    Debug.Print "    MISMATCH at line " & n & ": len=" & Len(s) & _
+                                " head=[" & Left$(s, 12) & "]"
+                End If
+                If bad > 100 Then
+                    Debug.Print "    (giving up after 100 mismatches)"
+                    Exit Do
+                End If
+            End If
+        Loop
+
+        Debug.Print "  Read " & n & " lines in " & Format$(Timer - t0, "0.0") & "s"
+        Check "E line count", (n = totalLines), CStr(totalLines), CStr(n)
+        Check "E every line intact", (bad = 0), "0 bad", CStr(bad) & " bad"
+
+        ' Line property should have advanced once per terminator.
+        Check "E Line property", (CLngLng(ts.Line) = totalLines + 1), _
+              CStr(totalLines + 1), CStr(ts.Line)
+
+        ts.Close
+        Set ts = Nothing
+
+        ' Bonus: the ReadAll guard should refuse a file this size with a clean 7,
+        ' not die inside a ReDim.
+        CheckReadAllGuard path
+        Exit Sub
+
+    Failed:
+        Fail "read raised " & Err.Number & " - " & Err.Description & "  (at line " & n & ")"
+        On Error Resume Next
+        If Not ts Is Nothing Then ts.Close
+    End Sub
+
+    ' ReadAll on a >2GB stream must raise 7 (out of memory / too large) BEFORE
+    ' consuming anything, leaving the stream usable.
+    Private Sub CheckReadAllGuard(ByVal path As String)
+        Dim ts As TextStream
+        Dim s As String
+        Dim raised As Long
+        On Error Resume Next
+        Set ts = FileSystemTools.OpenTextFile(path, ForReading)
+        s = ts.ReadAll()
+        raised = Err.Number
+        Err.Clear
+        On Error GoTo 0
+
+        Check "E ReadAll refuses >2GB with error 7", (raised = 7), "7", CStr(raised)
+
+        ' And the stream must still be usable after the refusal.
+        On Error Resume Next
+        Dim first As String
+        first = ts.ReadLine()
+        On Error GoTo 0
+        Check "E stream usable after ReadAll refusal", LineIsValid(first, 1^), _
+              "line 1 readable", "[" & Left$(first, 12) & "]"
+
+        On Error Resume Next
+        ts.Close
+    End Sub
+
+    '======================================================================
+    ' Line construction + validation
+    '======================================================================
+
+    ' 61 units: 8-digit counter, U+1F600 (a surrogate PAIR - 2 units), U+00E9,
+    ' U+4E2D, then 'x' padding. Deliberately spans 1-, 2-, 3- and 4-byte UTF-8
+    ' forms so one line exercises every branch of Utf8PrefixLen.
+    Private Function BuildLine(ByVal n As LongLong) As String
+        BuildLine = Right$("00000000" & CStr(n), 8) & _
+                    ChrW$(&HD83D&) & ChrW$(&HDE00&) & _
+                    ChrW$(&HE9) & _
+                    ChrW$(&H4E2D) & _
+                    String$(CONTENT_UNITS - 12, "x")
+    End Function
+
+    Private Function BuildBlock(ByVal firstLine As LongLong, ByVal lastLine As LongLong) As String
+        Dim sb() As String
+        Dim count As Long, i As Long
+        count = LINES_PER_BLOCK
+        If (firstLine + count - 1) > lastLine Then count = CLng(lastLine - firstLine + 1)
+        ReDim sb(0 To count - 1)
+        For i = 0 To count - 1
+            sb(i) = BuildLine(firstLine + i)
+        Next
+        BuildBlock = Join(sb, vbCrLf) & vbCrLf      ' Join omits the last separator
+    End Function
+
+    ' Checks length, counter AND the non-ASCII payload. Length alone would miss a
+    ' surrogate pair decoded as two replacement chars; the payload check would miss
+    ' a dropped line. Both together are tight.
+    Private Function LineIsValid(ByRef s As String, ByVal n As LongLong) As Boolean
+        If Len(s) <> CONTENT_UNITS Then Exit Function
+        If Left$(s, 8) <> Right$("00000000" & CStr(n), 8) Then Exit Function
+        If AscW(Mid$(s, 9, 1)) <> &HD83D Then Exit Function      ' high surrogate
+        If AscW(Mid$(s, 10, 1)) <> &HDE00 Then Exit Function     ' low surrogate
+        If AscW(Mid$(s, 11, 1)) <> &HE9 Then Exit Function
+        If AscW(Mid$(s, 12, 1)) <> &H4E2D Then Exit Function
+        LineIsValid = True
+    End Function
+
+    '======================================================================
+    ' Helpers
+    '======================================================================
+    Private Function TempPath(ByVal leaf As String) As String
+        TempPath = FileSystemTools.BuildPath( _
+            FileSystemTools.GetSpecialFolder(sfTemporaryFolder), leaf)
+    End Function
+
+    Private Function FileSize(ByVal path As String) As LongLong
+        Dim attrs As Long, size As LongLong
+        Dim cr As Date, mo As Date, ac As Date, leaf As String
+        If Not FileSystemTools.FileExists(path) Then Exit Function
+        FSTShared.StatPath path, attrs, size, cr, mo, ac, leaf
+        FileSize = size
+    End Function
+
+    Private Sub Check(ByVal name As String, ByVal ok As Boolean, _
+                      ByVal want As String, ByVal got As String)
+        If ok Then
+            mPassed = mPassed + 1
+            Debug.Print "  PASS  " & name
+        Else
+            mFailed = mFailed + 1
+            Debug.Print "  FAIL  " & name & "   want: " & want & "   got: " & got
+        End If
+    End Sub
+
+    Private Sub Fail(ByVal msg As String)
+        mFailed = mFailed + 1
+        Debug.Print "  FAIL  " & msg
+    End Sub
+
+    Public Sub CleanUp()
+        FileSystemTools.DeleteFile TempPath("_probe_u16.txt"), True, True
+        FileSystemTools.DeleteFile TempPath("_probe_u8.txt"), True, True
+        Debug.Print "Probe files deleted."
+    End Sub
+    
+    ' Differential test: our Folder.Size vs Scripting.FileSystemObject.
+    ' Run each case separately - case 3 may hang or blow the stack under FSO, which
+    ' is itself the finding.
+    Public Sub SizeOracle()
+        Dim fso As Object
+        Set fso = CreateObject("Scripting.FileSystemObject")
+        Dim root As String
+        root = FileSystemTools.BuildPath(FileSystemTools.GetSpecialFolder(sfTemporaryFolder), "sizeoracle")
+
+        ' --- setup: a folder with a known payload -------------------------------
+        FileSystemTools.DeleteFolder root, True, True
+        FileSystemTools.CreateFolder root, True
+        FileSystemTools.CreateFolder FileSystemTools.BuildPath(root, "real"), True
+        FileSystemTools.StringToTextFile String$(1000, "x"), _
+            FileSystemTools.BuildPath(root, "real\a.txt"), encUsAscii      ' 1000 bytes
+        FileSystemTools.StringToTextFile String$(500, "y"), _
+            FileSystemTools.BuildPath(root, "b.txt"), encUsAscii           ' 500 bytes
+
+        Report fso, root, "CASE 1: plain tree (expect 1500 both)"
+
+        ' --- CASE 2: junction to a SIBLING (no loop, but double-counts if followed)
+        ' Shell out: mklink /J <link> <target>
+        Debug.Print vbCrLf & "Now run:  mklink /J """ & root & "\link"" """ & root & "\real"""
+        Debug.Print "then call SizeOracle2."
+    End Sub
+
+    Public Sub SizeOracle2()
+        Dim fso As Object: Set fso = CreateObject("Scripting.FileSystemObject")
+        Dim root As String
+        root = FileSystemTools.BuildPath(FileSystemTools.GetSpecialFolder(sfTemporaryFolder), "sizeoracle")
+        Report fso, root, "CASE 2: junction to sibling" & vbCrLf & _
+            "        ours = 1500 (skips it)   FSO = 2500 if it FOLLOWS the junction"
+    End Sub
+
+    Private Sub Report(ByVal fso As Object, ByVal path As String, ByVal label As String)
+        Debug.Print vbCrLf & label
+        Debug.Print "  ours: " & FileSystemTools.GetFolder(path).Size
+        On Error Resume Next
+        Debug.Print "  FSO : " & fso.GetFolder(path).Size
+        If Err.Number <> 0 Then Debug.Print "  FSO RAISED: " & Err.Number & " - " & Err.Description
+        On Error GoTo 0
+    End Sub
+    
+    ' Differential test: an UNREADABLE subfolder. Ours vs Scripting.FileSystemObject.
+    '
+    ' Our FolderSize hits INVALID_HANDLE_VALUE on the denied folder and silently
+    ' contributes 0 - so the reported total is short, with no indication that a whole
+    ' subtree was skipped. FSO is expected to raise 70 (permission denied).
+    '
+    ' MUST run non-elevated. An explicit deny ACE is honoured by the normal file APIs,
+    ' but a process holding SeBackupPrivilege can bypass it - so if you run this
+    ' elevated you may see the deny do nothing at all, which looks like a pass and
+    ' isn't. If both sizes come back 1500, check your elevation before believing it.
+    Public Sub DenyOracle()
+        Dim fso As Object: Set fso = CreateObject("Scripting.FileSystemObject")
+        Dim sh As Object:  Set sh = CreateObject("WScript.Shell")
+
+        Dim root As String, locked As String, user As String
+        root = FileSystemTools.BuildPath(FileSystemTools.GetSpecialFolder(sfTemporaryFolder), "denyoracle")
+        locked = FileSystemTools.BuildPath(root, "locked")
+        user = Environ$("USERDOMAIN") & "\" & Environ$("USERNAME")
+
+        On Error GoTo CleanUp
+
+        ' --- setup: 500 bytes readable, 1000 bytes about to become unreadable ---
+        FileSystemTools.DeleteFolder root, True, True
+        FileSystemTools.CreateFolder root, True
+        FileSystemTools.CreateFolder locked, True
+        FileSystemTools.StringToTextFile String$(500, "y"), _
+            FileSystemTools.BuildPath(root, "visible.txt"), encUsAscii
+        FileSystemTools.StringToTextFile String$(1000, "x"), _
+            FileSystemTools.BuildPath(locked, "hidden.txt"), encUsAscii
+
+        Debug.Print "--- baseline (nothing denied yet) ---"
+        Debug.Print "  ours: " & FileSystemTools.GetFolder(root).Size & "   (expect 1500)"
+        Debug.Print "  FSO : " & fso.GetFolder(root).Size & "   (expect 1500)"
+
+        ' --- deny this user read access to the subfolder -----------------------
+        ' (OI)(CI) so it inherits; R = read, which includes FILE_LIST_DIRECTORY -
+        ' that is the right the enumeration actually needs.
+        Debug.Print vbCrLf & "  icacls: denying R on " & locked
+        sh.Run "cmd /c icacls """ & locked & """ /inheritance:r /deny """ & user & """:(OI)(CI)R", 0, True
+
+        ' Prove the deny actually took - if this SUCCEEDS, the ACE did nothing and
+        ' the rest of the test is meaningless.
+        Dim probeWorked As Boolean
+        On Error Resume Next
+        Dim n As Long
+        n = FileSystemTools.GetFilePaths(locked).Count
+        probeWorked = (Err.Number = 0)
+        Err.Clear
+        On Error GoTo CleanUp
+        If probeWorked Then
+            Debug.Print "  *** DENY DID NOT TAKE (still enumerated " & n & " files)."
+            Debug.Print "      Are you running elevated? Re-run non-elevated."
+            GoTo CleanUp
+        End If
+        Debug.Print "  deny confirmed: the folder is not enumerable"
+
+        ' --- the actual comparison --------------------------------------------
+        Debug.Print vbCrLf & "--- with 'locked' unreadable ---"
+
+        On Error Resume Next
+        Dim oursSize As LongLong
+        oursSize = FileSystemTools.GetFolder(root).Size
+        If Err.Number <> 0 Then
+            Debug.Print "  ours: RAISED " & Err.Number & " - " & Err.Description
+        Else
+            Debug.Print "  ours: " & oursSize & _
+                        IIf(oursSize = 500, "   <- silently dropped the locked subtree", "")
+        End If
+        Err.Clear
+
+        Dim fsoSize As Variant
+        fsoSize = fso.GetFolder(root).Size
+        If Err.Number <> 0 Then
+            Debug.Print "  FSO : RAISED " & Err.Number & " - " & Err.Description
+        Else
+            Debug.Print "  FSO : " & fsoSize
+        End If
+        Err.Clear
+        On Error GoTo CleanUp
+
+    CleanUp:
+        If Err.Number <> 0 Then Debug.Print "  (setup error " & Err.Number & ": " & Err.Description & ")"
+        ' Remove the deny BEFORE deleting, or the delete cannot recurse in either.
+        On Error Resume Next
+        sh.Run "cmd /c icacls """ & locked & """ /remove:d """ & user & """", 0, True
+        sh.Run "cmd /c icacls """ & locked & """ /reset", 0, True
+        FileSystemTools.DeleteFolder root, True, True
+        Debug.Print vbCrLf & "  cleaned up."
+    End Sub
+
+End Module

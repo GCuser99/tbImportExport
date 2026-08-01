@@ -1,0 +1,347 @@
+'==========================================================================
+'  LARGE-FILE PROBES  --  minutes, and gigabytes of %TEMP%                 
+'==========================================================================
+
+
+' ==========================================================================
+' LargeFileProbe
+'
+' Answers one question: does tB's INTERNAL file position for a positionless
+' Binary Put/Get run past 2^31 bytes, even though LOF() and Seek() surface as
+' Long?
+'
+' Why it matters: both TextStream's fresh-write path (FlushWriteChunk -> Put with
+' no position arg) and its read path (FillSome -> Get with no position arg) are
+' purely sequential. Neither ever seeks after the initial BOM skip. So if the
+' underlying position counter is 64-bit, both are already unbounded and only the
+' SIZING calls (LOF) need fixing. If it is 32-bit, no amount of widening our own
+' types helps and the file I/O has to move to raw Win32 handles.
+'
+' Phase A tests raw VB Binary I/O with no TextStream involved - that is the real
+' experiment. Phase B then confirms TextStream inherits the answer.
+'
+' Verification uses FileSystemTools.GetFile().Size (LongLong, via StatPath ->
+' GetFileAttributesExW), NOT LOF - the whole point is that LOF cannot be trusted
+' here. Comparing the two is itself informative, so both are reported.
+'
+' NOTE: Seek() is Long in tB, so we CANNOT random-access past 2GB to spot-check
+' content. Verification is therefore (1) exact on-disk size, and (2) a sequential
+' read-back in Phase C. That limitation is itself a finding: nothing in the
+' library may rely on a large Seek.
+'
+' Run RunAll. Needs ~5 GB free (Phase A file + Phase B file).
+' ==========================================================================
+
+Private Module LargeFileProbe
+    Option Explicit
+
+    ' Target just over 2 GB. 2^31 = 2,147,483,648. We overshoot by ~250 MB so a
+    ' wrap/truncation at the boundary is unmistakable rather than borderline.
+    Private Const TARGET_BYTES As LongLong = 2400000000^
+    'Private Const TARGET_BYTES As LongLong = 4500000000^   ' > 2^32 (4,294,967,296)
+
+    Private Const BLOCK_SIZE As Long = 65536          ' matches TextStream.STREAM_CHUNK
+    Private Const LINE_LEN As Long = 64               ' bytes per line INCLUDING CRLF
+    Private Const LINES_PER_BLOCK As Long = BLOCK_SIZE \ LINE_LEN    ' 1024
+
+    ' Set these to a volume with room to spare.
+    ' Derived from %TEMP% at run time, NOT hard-coded (see AppendProbe for why
+    ' these are Functions rather than Consts). RAW_PATH must match AppendProbe's -
+    ' Phase D appends to the file Phase A leaves behind.
+    Private Function RAW_PATH() As String
+        RAW_PATH = FileSystemTools.BuildPath( _
+                       FileSystemTools.GetSpecialFolder(sfTemporaryFolder), "_probe_raw.bin")
+    End Function
+
+    Private Function TS_PATH() As String
+        TS_PATH = FileSystemTools.BuildPath( _
+                       FileSystemTools.GetSpecialFolder(sfTemporaryFolder), "_probe_textstream.txt")
+    End Function
+
+    '======================================================================
+    Public Sub RunAll()
+        Debug.Print "=== LargeFileProbe ==="
+        Debug.Print "Target: " & TARGET_BYTES & " bytes (2^31 = 2147483648)"
+
+        If Not CheckFreeSpace(RAW_PATH, TARGET_BYTES * 2) Then Exit Sub
+
+        PhaseA_RawBinaryPut
+        PhaseB_TextStreamWrite
+        PhaseC_SequentialReadBack
+    End Sub
+    
+    Public Sub TestSizeFromHL()
+        ' high/low are the two halves of a Win32 file size. 'low' arrives in a SIGNED
+        ' Long, so any value with bit 31 set comes through negative - that is what the
+        ' +2^32 correction fixes. These four cases cover both branches, both signs.
+        CheckSize 0, 0, 0^, "empty"
+        CheckSize 0, 1000, 1000^, "tiny"
+        CheckSize 0, &H7FFFFFFF, 2147483647^, "2^31-1 (low dword, positive)"
+        CheckSize 0, &H80000000, 2147483648^, "2^31   (low dword goes NEGATIVE)"
+        CheckSize 0, &HFFFFFFFF, 4294967295^, "2^32-1 (max low dword)"
+        CheckSize 1, 0, 4294967296^, "2^32   (high dword = 1) <-- NEVER RUN"
+        CheckSize 1, &H2FAF080, 4344967296^, "~4.34GB (high=1, low=50,000,000)"
+        CheckSize64 4500000000^, "4.5GB"
+        CheckSize 2, 0, 8589934592^, "8GB"
+    End Sub
+    
+    Private Sub CheckSize64(ByVal want As LongLong, ByVal name As String)
+        ' Split the target the way Win32 does, then reassemble it. Round-trip test:
+        ' no hand-computed hex to get wrong.
+        Dim hi As Long, lo As Long
+        hi = CLng(want >> 32)
+        lo = CLng(want And 4294967295^)      ' may come out negative - that IS the point
+        Dim got As LongLong
+        got = FSTShared.SizeFromHL(hi, lo)
+        If got = want Then
+            Debug.Print "  PASS  " & name & "  = " & got
+        Else
+            Debug.Print "  FAIL  " & name & "  want " & want & "  got " & got
+        End If
+    End Sub
+
+    Private Sub CheckSize(ByVal hi As Long, ByVal lo As Long, _
+                          ByVal want As LongLong, ByVal name As String)
+        Dim got As LongLong
+        got = FSTShared.SizeFromHL(hi, lo)
+        If got = want Then
+            Debug.Print "  PASS  " & name & "  = " & got
+        Else
+            Debug.Print "  FAIL  " & name & "  want " & want & "  got " & got
+        End If
+    End Sub
+    
+
+    '======================================================================
+    ' Phase A - the actual experiment: raw Binary Put, positionless, past 2GB.
+    '======================================================================
+    Public Sub PhaseA_RawBinaryPut()
+        Debug.Print vbCrLf & "--- Phase A: raw Binary Put ---"
+
+        Dim block() As Byte
+        Dim fn As Long
+        Dim written As LongLong
+        Dim blockNo As Long
+        Dim t0 As Double
+        Dim lineNo As LongLong
+
+        On Error GoTo Failed
+        FileSystemTools.DeleteFile RAW_PATH, True, True     ' force, ignoreMissing
+
+        t0 = Timer
+        fn = FreeFile()
+        Open RAW_PATH For Binary Access Write As #fn
+
+        lineNo = 1
+        Do While written < TARGET_BYTES
+            block = BuildBlock(lineNo)                      ' advances lineNo by LINES_PER_BLOCK
+            lineNo = lineNo + LINES_PER_BLOCK
+
+            Put #fn,, block                                ' POSITIONLESS - the thing under test
+            written = written + BLOCK_SIZE
+            blockNo = blockNo + 1
+
+            ' Progress + an early warning right at the boundary, so a failure is
+            ' obvious in seconds rather than after the whole run.
+            If (blockNo Mod 4096) = 0 Then
+                Debug.Print "  " & Format$(written / 1073741824#, "0.00") & " GB written" & _
+                            "   (LOF says " & LOF(fn) & ")"
+            End If
+        Loop
+
+        Close #fn
+        fn = 0
+
+        Report "Phase A", RAW_PATH, written, Timer - t0
+        Exit Sub
+
+    Failed:
+        Debug.Print "  *** FAILED at block " & blockNo & _
+                    " (~" & Format$(written / 1073741824#, "0.00") & " GB): " & _
+                    Err.Number & " - " & Err.Description
+        Debug.Print "  => Positionless Put is 32-bit bound. Raw Win32 handles required."
+        If fn <> 0 Then Close #fn
+    End Sub
+
+    '======================================================================
+    ' Phase B - does TextStream's fresh-write path inherit the answer?
+    ' Uses Write (not WriteLine) with pre-built 64KB blocks: WriteLine per 64-byte
+    ' line would call AdvancePosition ~37M times, which allocates a Byte() per call.
+    '======================================================================
+    Public Sub PhaseB_TextStreamWrite()
+        Debug.Print vbCrLf & "--- Phase B: TextStream fresh write (UTF-8, no BOM) ---"
+
+        Dim ts As TextStream
+        Dim written As LongLong
+        Dim blockNo As Long
+        Dim lineNo As LongLong
+        Dim t0 As Double
+
+        On Error GoTo Failed
+        FileSystemTools.DeleteFile TS_PATH, True, True
+
+        t0 = Timer
+        Set ts = FileSystemTools.CreateTextFile(TS_PATH, True, encUtf8, nlWindows)
+        Debug.Print "  IsStreaming = " & ts.IsStreaming & _
+                    "   (must be True, or this is testing the buffered path instead)"
+
+        lineNo = 1
+        Do While written < TARGET_BYTES
+            ' ASCII only, so 1 char = 1 UTF-8 byte and the arithmetic stays exact.
+            ts.Write BuildBlockText(lineNo)
+            lineNo = lineNo + LINES_PER_BLOCK
+            written = written + BLOCK_SIZE
+            blockNo = blockNo + 1
+            If (blockNo Mod 4096) = 0 Then _
+                Debug.Print "  " & Format$(written / 1073741824#, "0.00") & " GB written"
+        Loop
+
+        ts.Close
+        Set ts = Nothing
+
+        Report "Phase B", TS_PATH, written, Timer - t0
+        Exit Sub
+
+    Failed:
+        Debug.Print "  *** FAILED at block " & blockNo & _
+                    " (~" & Format$(written / 1073741824#, "0.00") & " GB): " & _
+                    Err.Number & " - " & Err.Description
+        On Error Resume Next
+        If Not ts Is Nothing Then ts.Close
+    End Sub
+    
+    '======================================================================
+    ' Phase C - sequential read-back. Only meaningful if A/B produced a correct
+    ' size. Deliberately raw Get, positionless: same question, other direction.
+    ' Verifies the line counter at the START of each block, which is what proves
+    ' nothing was silently dropped or duplicated across the 2GB mark.
+    '======================================================================
+    Public Sub PhaseC_SequentialReadBack()
+        Debug.Print vbCrLf & "--- Phase C: raw Binary Get, sequential read-back ---"
+
+        Dim actual As LongLong
+        actual = FileSystemTools.GetFile(RAW_PATH).Size
+        If actual < TARGET_BYTES Then
+            Debug.Print "  Skipped: Phase A file is only " & actual & " bytes."
+            Exit Sub
+        End If
+
+        Dim fn As Long, block() As Byte, blockNo As Long
+        Dim readBytes As LongLong, expectedLine As LongLong, gotLine As LongLong
+        Dim bad As Long
+        Dim t0 As Double
+
+        On Error GoTo Failed
+        t0 = Timer
+        ReDim block(0 To BLOCK_SIZE - 1)
+        fn = FreeFile()
+        Open RAW_PATH For Binary Access Read As #fn
+
+        expectedLine = 1
+        Do While readBytes < actual - BLOCK_SIZE
+            Get #fn,, block                                ' POSITIONLESS - the read-side test
+            gotLine = LineNoFromBlock(block)
+            If gotLine <> expectedLine Then
+                bad = bad + 1
+                If bad <= 5 Then _
+                    Debug.Print "  MISMATCH at ~" & Format$(readBytes / 1073741824#, "0.00") & _
+                                " GB: expected line " & expectedLine & ", got " & gotLine
+            End If
+            expectedLine = expectedLine + LINES_PER_BLOCK
+            readBytes = readBytes + BLOCK_SIZE
+            blockNo = blockNo + 1
+        Loop
+
+        Close #fn
+        Debug.Print "  Read " & readBytes & " bytes in " & Format$(Timer - t0, "0.0") & "s"
+        If bad = 0 Then
+            Debug.Print "  PASS: every block landed where expected, including past 2GB."
+        Else
+            Debug.Print "  *** " & bad & " mismatched blocks - sequential Get is NOT position-safe past 2GB."
+        End If
+        Exit Sub
+
+    Failed:
+        Debug.Print "  *** FAILED at ~" & Format$(readBytes / 1073741824#, "0.00") & " GB: " & _
+                    Err.Number & " - " & Err.Description
+        If fn <> 0 Then Close #fn
+    End Sub
+
+    '======================================================================
+    ' Helpers
+    '======================================================================
+
+    ' The verdict. The ONLY trustworthy size here is GetFile().Size (LongLong, via
+    ' GetFileAttributesExW); LOF is printed purely to document how it misbehaves.
+    Private Sub Report(ByVal phase As String, ByVal path As String, _
+                       ByVal expected As LongLong, ByVal secs As Double)
+        Dim actual As LongLong
+        actual = FileSystemTools.GetFile(path).Size
+
+        Debug.Print "  Elapsed:  " & Format$(secs, "0.0") & "s"
+        Debug.Print "  Expected: " & expected
+        Debug.Print "  On disk:  " & actual & "   (via GetFile.Size, 64-bit)"
+
+        Dim fn As Long
+        fn = FreeFile()
+        Open path For Binary Access Read As #fn
+        Debug.Print "  LOF says: " & LOF(fn) & "   (Long - expect this to be wrong)"
+        Close #fn
+
+        If actual = expected Then
+            Debug.Print "  >>> " & phase & " PASS: positionless Put is 64-bit safe."
+        Else
+            Debug.Print "  >>> " & phase & " FAIL: short by " & (expected - actual) & " bytes."
+        End If
+    End Sub
+
+    ' One 64KB block of fixed-width lines: 8-digit line number, 54 'x', CRLF = 64
+    ' bytes. Fixed width means byte offset N maps to a known line, which is what
+    ' makes Phase C able to prove nothing shifted.
+    Private Function BuildBlockText(ByVal firstLine As LongLong) As String
+        Dim sb() As String
+        ReDim sb(0 To LINES_PER_BLOCK - 1)
+        Dim i As Long
+        For i = 0 To LINES_PER_BLOCK - 1
+            sb(i) = Right$("00000000" & CStr(firstLine + i), 8) & String$(54, "x")
+        Next
+        BuildBlockText = Join(sb, vbCrLf) & vbCrLf       ' Join omits the final one
+    End Function
+
+    Private Function BuildBlock(ByVal firstLine As LongLong) As Byte()
+        ' ASCII round-trips through the system code page unchanged, so this is an
+        ' exact 1 char = 1 byte conversion.
+        BuildBlock = TextCodec.EncodeBytes(BuildBlockText(firstLine), encUsAscii)
+    End Function
+
+    ' Reads the 8-digit counter from the first line of a block.
+    Private Function LineNoFromBlock(ByRef block() As Byte) As LongLong
+        Dim s As String, i As Long
+        For i = 0 To 7
+            s = s & Chr$(block(i))
+        Next
+        LineNoFromBlock = CLngLng(s)
+    End Function
+
+    Private Function CheckFreeSpace(ByVal path As String, ByVal needed As LongLong) As Boolean
+        On Error GoTo NoInfo
+        Dim dr As Drive
+        Set dr = FileSystemTools.GetDrive(path)
+        Debug.Print "Free space on " & dr.DriveLetter & ": " & _
+                    Format$(dr.FreeSpace / 1073741824#, "0.0") & " GB (need ~" & _
+                    Format$(needed / 1073741824#, "0.0") & " GB)"
+        CheckFreeSpace = (dr.FreeSpace > needed)
+        If Not CheckFreeSpace Then Debug.Print "*** Not enough free space - aborting."
+        Exit Function
+    NoInfo:
+        Debug.Print "(Could not read free space; continuing anyway.)"
+        CheckFreeSpace = True
+    End Function
+
+    Public Sub CleanUp()
+        FileSystemTools.DeleteFile RAW_PATH, True, True
+        FileSystemTools.DeleteFile TS_PATH, True, True
+        Debug.Print "Probe files deleted."
+    End Sub
+
+End Module

@@ -1,0 +1,274 @@
+' ==========================================================================
+' AppendProbe (LargeFileProbe Phase D)
+'
+' Verifies the one claim the earlier phases could not: that TextStream's
+' FILE_APPEND_DATA write path appends correctly to a >2GB file - the operation
+' that VB file I/O could not perform at all (32-bit Seek -> bare E_FAIL).
+'
+' A size check alone is NOT sufficient here. The failure mode that matters is
+' subtle: if the handle were opened with FILE_APPEND_DATA *OR'd with*
+' GENERIC_WRITE, the append-at-EOF semantics would be lost and every write would
+' land at position 0 - silently overwriting the head of the file. If you happened
+' to write the same number of bytes you clobbered, the size would look perfect.
+'
+' So all three must hold:
+'   1. HEAD INTACT  - the first bytes are byte-for-byte what they were
+'   2. SIZE GREW    - by exactly the number of bytes we appended, no more, no less
+'   3. TAIL CORRECT - the appended bytes are at the END, and are exactly what we
+'                     wrote (no BOM re-emitted, no newline mangling)
+'
+' D1 runs against the 2.4GB file from LargeFileProbe Phase A (the real test).
+' D2 is a fast small-file version of the same three checks - run it first, since
+' a failure there means something basic is wrong and D1 will just waste minutes.
+'
+' PREREQ for D1: LargeFileProbe.PhaseA_RawBinaryPut has left its file in place.
+'                D1 APPENDS to that file, so re-create it before re-running
+'                LargeFileProbe (Phase C's block math assumes an unmodified file).
+' ==========================================================================
+
+Private Module AppendProbe
+    Option Explicit
+
+    ' Derived from %TEMP% at run time, NOT hard-coded: a Const cannot call a
+    ' function, so these are zero-arg Functions (callable without parens, so every
+    ' existing call site is unchanged). RAW_PATH must match LargeFileProbe's.
+    Private Function RAW_PATH() As String
+        RAW_PATH = FileSystemTools.BuildPath( _
+                       FileSystemTools.GetSpecialFolder(sfTemporaryFolder), "_probe_raw.bin")
+    End Function
+
+    Private Function SMALL_PATH() As String
+        SMALL_PATH = FileSystemTools.BuildPath( _
+                       FileSystemTools.GetSpecialFolder(sfTemporaryFolder), "_probe_append_small.txt")
+    End Function
+
+    Private Const HEAD_CHECK_BYTES As Long = 4096              ' how much of the head we fingerprint
+    Private Const LINE_LEN As Long = 64
+
+    Private mPassed As Long
+    Private mFailed As Long
+
+    Public Sub RunAll()
+        mPassed = 0
+        mFailed = 0
+        Debug.Print "=== Phase D: append via FILE_APPEND_DATA ==="
+
+        PhaseD2_SmallFileAppend      ' fast sanity first
+        PhaseD1_LargeFileAppend      ' the real test
+
+        Debug.Print vbCrLf & "=== " & mPassed & " passed, " & mFailed & " failed ==="
+        If mFailed > 0 Then Debug.Print "*** DO NOT SHIP - inspect before appending to anything you care about."
+    End Sub
+
+    '======================================================================
+    ' D2 - small file. Same three checks, runs in milliseconds. If the access
+    ' right is wrong, this catches it here rather than after a 2.4GB read.
+    '======================================================================
+    Public Sub PhaseD2_SmallFileAppend()
+        Debug.Print vbCrLf & "--- D2: small-file append (sanity) ---"
+
+        On Error GoTo Failed
+        FileSystemTools.DeleteFile SMALL_PATH, True, True
+
+        ' Seed a known file. UTF-8 + BOM on purpose: the append must NOT emit a
+        ' second BOM into the middle of the stream.
+        FileSystemTools.StringToTextFile "alpha" & vbCrLf & "beta" & vbCrLf, _
+                                         SMALL_PATH, encUtf8Bom
+
+        Dim before As LongLong, headBefore() As Byte
+        before = FileSize(SMALL_PATH)
+        FileSystemTools.ReadStream SMALL_PATH, headBefore, HEAD_CHECK_BYTES
+
+        Dim marker As String
+        marker = "gamma"
+
+        Dim ts As TextStream
+        Set ts = FileSystemTools.OpenTextFile(SMALL_PATH, ForAppending)
+        Check "D2 IsStreaming", ts.IsStreaming, "True", CStr(ts.IsStreaming)
+        Check "D2 encoding preserved (BOM)", (ts.Encoding = encUtf8Bom), _
+              CStr(encUtf8Bom), CStr(ts.Encoding)
+        ts.WriteLine marker
+        ts.Close
+
+        Dim after As LongLong, headAfter() As Byte
+        after = FileSize(SMALL_PATH)
+        FileSystemTools.ReadStream SMALL_PATH, headAfter, HEAD_CHECK_BYTES
+
+        ' 1. head intact
+        Check "D2 head unchanged", HeadMatches(headBefore, headAfter), _
+              "identical", "DIFFERENT - the append overwrote the head!"
+
+        ' 2. size grew by exactly the marker + CRLF (ASCII -> 1 byte per char), no BOM
+        Dim wantDelta As LongLong
+        wantDelta = Len(marker) + 2
+        Check "D2 size delta", (after - before = wantDelta), _
+              CStr(wantDelta), CStr(after - before)
+
+        ' 3. content reads back whole and in order
+        Dim all As String
+        all = FileSystemTools.TextFileToString(SMALL_PATH)
+        Check "D2 content", (all = "alpha" & vbCrLf & "beta" & vbCrLf & "gamma" & vbCrLf), _
+              "alpha/beta/gamma", "[" & VBA.Replace$(all, vbCrLf, "\r\n") & "]"
+
+        FileSystemTools.DeleteFile SMALL_PATH, True, True
+        Exit Sub
+
+    Failed:
+        Fail "D2 raised " & Err.Number & " - " & Err.Description
+        On Error Resume Next
+        If Not ts Is Nothing Then ts.Close
+    End Sub
+
+    '======================================================================
+    ' D1 - the 2.4GB file. This is the operation that was previously impossible.
+    '======================================================================
+    Public Sub PhaseD1_LargeFileAppend()
+        Debug.Print vbCrLf & "--- D1: append to a >2GB file ---"
+
+        Dim before As LongLong
+        before = FileSize(RAW_PATH)
+        If before < 2200000000^ Then
+            Debug.Print "  Skipped: " & RAW_PATH & " is " & before & " bytes. Run LargeFileProbe Phase A first."
+            Exit Sub
+        End If
+        Debug.Print "  Size before: " & before
+
+        ' Fingerprint the head BEFORE touching anything. This is the check that
+        ' catches a write landing at position 0.
+        Dim headBefore() As Byte
+        FileSystemTools.ReadStream RAW_PATH, headBefore, HEAD_CHECK_BYTES
+
+        Dim marker As String
+        marker = "APPENDED" & String$(54, "z")        ' 62 chars, +CRLF = 64: one more fixed-width line
+
+        Dim ts As TextStream
+        Dim t0 As Double
+        On Error GoTo Failed
+        t0 = Timer
+
+        Set ts = FileSystemTools.OpenTextFile(RAW_PATH, ForAppending)
+        Check "D1 IsStreaming", ts.IsStreaming, "True", CStr(ts.IsStreaming)
+        ts.WriteLine marker
+        ts.Close
+        Set ts = Nothing
+
+        Debug.Print "  Append took " & Format$(Timer - t0, "0.00") & "s" & _
+                    "   (instant = it did not read the file to find the end)"
+
+        ' --- 1. HEAD INTACT ---
+        Dim headAfter() As Byte
+        FileSystemTools.ReadStream RAW_PATH, headAfter, HEAD_CHECK_BYTES
+        Check "D1 head unchanged", HeadMatches(headBefore, headAfter), _
+              "identical", "DIFFERENT - writes landed at position 0, NOT at EOF!"
+
+        ' --- 2. SIZE GREW BY EXACTLY 64 ---
+        Dim after As LongLong
+        after = FileSize(RAW_PATH)
+        Debug.Print "  Size after:  " & after
+        Check "D1 size delta", (after - before = LINE_LEN), _
+              CStr(LINE_LEN), CStr(after - before)
+
+        ' --- 3. TAIL IS OUR MARKER ---
+        ' Seek cannot reach past 2GB, so read sequentially and keep the last block.
+        Dim tail As String
+        tail = ReadTail(RAW_PATH, after, LINE_LEN)
+        Check "D1 tail is the appended line", (tail = marker & vbCrLf), _
+              marker & "\r\n", "[" & VBA.Replace$(tail, vbCrLf, "\r\n") & "]"
+
+        Debug.Print vbCrLf & "  NOTE: " & RAW_PATH & " now has one extra line. Re-create it"
+        Debug.Print "        before re-running LargeFileProbe Phase C."
+        Exit Sub
+
+    Failed:
+        Fail "D1 raised " & Err.Number & " - " & Err.Description
+        On Error Resume Next
+        If Not ts Is Nothing Then ts.Close
+    End Sub
+
+    '======================================================================
+    ' Helpers
+    '======================================================================
+
+    ' Reads the last n bytes by streaming the whole file - the only option, since
+    ' Seek is 32-bit and cannot position past 2GB. Cheap in practice: the file was
+    ' just written, so it comes from the page cache.
+    Private Function ReadTail(ByVal path As String, ByVal size As LongLong, ByVal n As Long) As String
+        Const BLK As Long = 65536
+        Dim fn As Long, buf() As Byte, keep() As Byte
+        Dim readSoFar As LongLong, toRead As Long
+
+        ReDim keep(0 To n - 1)
+        fn = FreeFile()
+        Open path For Binary Access Read As #fn
+
+        Do While readSoFar < size
+            toRead = BLK
+            If (size - readSoFar) < BLK Then toRead = CLng(size - readSoFar)
+            ReDim buf(0 To toRead - 1)
+            Get #fn,, buf                       ' positionless: 64-bit safe (verified)
+            readSoFar = readSoFar + toRead
+
+            ' Keep a rolling copy of the last n bytes seen.
+            If toRead >= n Then
+                Dim i As Long
+                For i = 0 To n - 1
+                    keep(i) = buf(toRead - n + i)
+                Next
+            End If
+        Loop
+        Close #fn
+
+        ReadTail = TextCodec.DecodeBytes(keep, encUsAscii, nlNoChange)
+    End Function
+
+    ' Compares the head fingerprints. Only the first Len(before) bytes are compared:
+    ' on a file smaller than HEAD_CHECK_BYTES the "head" IS the whole file, so the
+    ' after-image is legitimately LONGER. Comparing lengths would then report a
+    ' clobbered head for every successful append.
+    Private Function HeadMatches(ByRef before() As Byte, ByRef after() As Byte) As Boolean
+        Dim n As Long, i As Long
+        n = TextCodec.SafeCountB(before)
+        If n = 0 Then HeadMatches = True: Exit Function
+        If TextCodec.SafeCountB(after) < n Then Exit Function      ' file SHRANK - real failure
+        For i = 0 To n - 1
+            If after(LBound(after) + i) <> before(LBound(before) + i) Then Exit Function
+        Next
+        HeadMatches = True
+    End Function
+
+    ' 64-bit size. LOF is exactly what cannot be trusted here.
+    Private Function FileSize(ByVal path As String) As LongLong
+        Dim attrs As Long, size As LongLong
+        Dim cr As Date, mo As Date, ac As Date, leaf As String
+        If Not FileSystemTools.FileExists(path) Then Exit Function
+        FSTShared.StatPath path, attrs, size, cr, mo, ac, leaf
+        FileSize = size
+    End Function
+
+    Private Sub Check(ByVal name As String, ByVal ok As Boolean, _
+                      ByVal want As String, ByVal got As String)
+        If ok Then
+            mPassed = mPassed + 1
+            Debug.Print "  PASS  " & name
+        Else
+            mFailed = mFailed + 1
+            Debug.Print "  FAIL  " & name & "   want: " & want & "   got: " & got
+        End If
+    End Sub
+
+    Private Sub Fail(ByVal msg As String)
+        mFailed = mFailed + 1
+        Debug.Print "  FAIL  " & msg
+    End Sub
+
+    ' Removes only what THIS module creates. RAW_PATH is deliberately NOT deleted
+    ' here - it belongs to LargeFileProbe Phase A, and D1 only appends to it.
+    ' TestSuite.CleanUpAll sweeps that one via LargeFileProbe.CleanUp.
+    Public Sub CleanUp()
+        On Error Resume Next
+        FileSystemTools.DeleteFile SMALL_PATH, True, True
+        On Error GoTo 0
+    End Sub
+
+End Module
+

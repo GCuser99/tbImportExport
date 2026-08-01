@@ -1,0 +1,4 @@
+Exported "Test Project 1" -> C:\Users\waite\Documents\GitHub\tbImportExport\test_empty_folders.twinproj  (844984 bytes, 32 files, 3 directories)
+  note: expected folders not present on disk: Resources, Settings, ImportedTypeLibraries, Miscellaneous, Packages.
+  twinBASIC should rebuild them on Open Project."
+
