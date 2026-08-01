@@ -8,7 +8,6 @@ Module modShared
 
     Option Explicit
     
-    Private Const INVALID_HANDLE= -1
     Private Const IE_LONGPATH_THRESHOLD As Long = 248
 
     ' ============================================================== UTF-8 ===
@@ -154,7 +153,7 @@ Module modShared
 
         pattern = ApiPath(JoinPath(dirPath, "*"))
         h = FindFirstFileW(StrPtr(pattern), fd)
-        If h = INVALID_HANDLE Then Exit Sub
+        If h = INVALID_HANDLE_VALUE Then Exit Sub
 
         Do
             nm = WCharBufToStr(fd.cFileName(0), MAX_PATH)

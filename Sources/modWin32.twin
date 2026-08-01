@@ -5,7 +5,7 @@
 ' These can be removed if WinDevLib package is referenced
 
 Private Module modWin32
-
+    '/*
     Public Declare PtrSafe Sub CopyMemory Lib "kernel32" Alias "RtlMoveMemory" (Destination As Any, Source As Any, ByVal Length As LongPtr)
     Public Declare PtrSafe Function MultiByteToWideChar Lib "kernel32" (ByVal CodePage As CodePageDefaults, ByVal dwFlags As MBWC_Flags, ByVal lpMultiByteStr As LongPtr, ByVal cchMultiByte As Long, ByVal lpWideCharStr As LongPtr, ByVal cchWideChar As Long) As Long
     Public Declare PtrSafe Function WideCharToMultiByte Lib "kernel32" (ByVal CodePage As CodePageDefaults, ByVal dwFlags As WCMB_Flags, ByVal lpWideCharStr As LongPtr, ByVal cchWideChar As Long, ByVal lpMultiByteStr As LongPtr, ByVal cbMultiByte As Long, Optional ByVal lpDefaultChar As LongPtr, Optional lpUsedDefaultChar As BOOL) As Long
@@ -121,6 +121,7 @@ Private Module modWin32
     End Type
     
     Public Const MAX_PATH As Long = 260
+    Public Const INVALID_HANDLE_VALUE As LongPtr = -1&
     
     ' -------------------  Console declares  -------------------
     
@@ -132,6 +133,20 @@ Private Module modWin32
     Public Declare PtrSafe Function ReadConsoleW Lib "kernel32" (ByVal hConsoleInput As LongPtr, ByVal lpBuffer As LongPtr, ByVal nNumberOfCharsToRead As Long, ByRef lpNumberOfCharsRead As Long, pInputControl As CONSOLE_READCONSOLE_CONTROL) As BOOL
     Public DeclareWide PtrSafe Function SysAllocStringLen Lib "oleaut32" (ByVal Value As String, ByVal Length As Long) As String
     Public Declare PtrSafe Function WriteFile Lib "kernel32" (ByVal hFile As LongPtr, lpBuffer As Any, ByVal nNumberOfBytesToWrite As Long, lpNumberOfBytesWritten As Long, lpOverlapped As OVERLAPPED) As BOOL
+    Public Declare PtrSafe Function GetConsoleMode Lib "kernel32" (ByVal hConsoleHandle As LongPtr, lpMode As CONSOLE_INPUT_MODE_FLAGS) As BOOL
+    
+    Public Enum CONSOLE_INPUT_MODE_FLAGS
+        ENABLE_PROCESSED_INPUT = &H0001
+        ENABLE_LINE_INPUT = &H0002
+        ENABLE_ECHO_INPUT = &H0004
+        ENABLE_WINDOW_INPUT = &H0008
+        ENABLE_MOUSE_INPUT = &H0010
+        ENABLE_INSERT_MODE = &H0020
+        ENABLE_QUICK_EDIT_MODE = &H0040
+        ENABLE_EXTENDED_FLAGS = &H0080
+        ENABLE_AUTO_POSITION = &H0100
+        ENABLE_VIRTUAL_TERMINAL_INPUT = &H0200
+    End Enum
     
     Public Type OVERLAPPED
         Internal As LongPtr
@@ -207,5 +222,5 @@ Private Module modWin32
         STD_OUTPUT_HANDLE = -11
         STD_ERROR_HANDLE = -12
     End Enum
-
+    '*/
 End Module

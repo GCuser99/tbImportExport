@@ -9,7 +9,7 @@
 '     indexer/sample.twinpack in twinBASIC's own development repository and
 '     exits(1) when it is absent -- which is every time, since that fixture
 '     is not part of the published download. Here the four sample-driven
-'     tests are skipped with [SKIP] when no sample is supplied, and the four
+'     tests are skipped with [SKIP] when no sample is supplied, and the
 '     synthetic tests still run.
 '
 '   * The sample tests assert INVARIANTS rather than the fixture-specific
@@ -152,6 +152,29 @@ Private Module modSelfTest
         Next
     End Sub
 
+    ' Writes a minimal but valid-looking project tree on disk under the given
+    ' name and returns its full path. Includes a top-level "Settings" FILE
+    ' (its real on-disk form) so DoExport's Settings guard is satisfied. Used
+    ' by the guard tests and available to any future disk test that needs a
+    ' packable tree without depending on the sample.
+    Private Function MakeProjectTree(ByVal name As String, ByVal withSettings As Boolean) As String
+        Dim d As String
+        d = JoinPath(mTmpDir, name)
+        EnsureDirectory d
+
+        Dim body() As Byte, n As Long
+        Utf8Encode "Public Sub Main()" & vbCrLf & "End Sub", body, n
+        WriteWholeFile JoinPath(d, "Module1.twin"), body, n
+
+        If withSettings Then
+            Dim sbody() As Byte, sn As Long
+            Utf8Encode "[Settings]" & vbCrLf & "Name=" & name, sbody, sn
+            WriteWholeFile JoinPath(d, "Settings"), sbody, sn
+        End If
+
+        Return d
+    End Function
+
     ' ------------------------------------------- tests requiring a sample
 
     ' Invariants that hold for ANY well-formed file, plus a re-parse
@@ -220,6 +243,11 @@ Private Module modSelfTest
         End If
     End Sub
 
+    ' Sample-driven. Exports the imported sample WITHOUT opting out of the
+    ' Settings guard -- so this doubles as real-world coverage that a genuine
+    ' project (which has a Settings entry) packs cleanly. If this fails with
+    ' IE_ERR_NO_SETTINGS, the sample lacks a top-level Settings entry, which
+    ' would itself be worth knowing.
     Private Sub T_DiskRoundTrip()
         Dim dir1 As String, dir2 As String, rtFile As String
         dir1 = JoinPath(mTmpDir, "import1")
@@ -408,14 +436,15 @@ Caught:
                  " source=""" & Err.Source & """ desc=""" & Err.Description & """"
         End If
     End Sub
-    
+
     ' Builds a real on-disk tree whose deepest file path exceeds the legacy
     ' 260-char limit, exports it, and re-imports it. Self-validating: the
     ' fixture cannot even be created unless the long-path code works, and a
     ' capped chokepoint anywhere raises rather than silently truncating.
     '
     ' Uses the disk, so it is grouped with the sample tests' need for a temp
-    ' dir -- but needs no sample, so it runs unconditionally.
+    ' dir -- but needs no sample, so it runs unconditionally. Opts out of the
+    ' Settings guard: this fixture tests path length, not project validity.
     Private Sub T_LongPath()
         ' A chain of 40-char directory segments. Six levels puts the leaf
         ' file comfortably past 260 even from a short temp root.
@@ -448,7 +477,7 @@ Caught:
         packFile = JoinPath(mTmpDir, "longpath.bin")
         dstRoot = JoinPath(mTmpDir, "longpath-out")
 
-        DoExport srcRoot, packFile, True
+        DoExport srcRoot, packFile, True, requireSettings:=False
         DoImport packFile, dstRoot, True
 
         ' Walk down the re-imported copy to the same leaf and check bytes.
@@ -466,6 +495,49 @@ Caught:
         If Not BytesEqual(body, bodyLen, got, gotLen) Then
             Fail "long-path content mismatch"
         End If
+    End Sub
+
+    ' The Settings guard must REFUSE to pack a tree with no top-level Settings
+    ' entry, because the resulting file opens with references, project name,
+    ' and version blanked -- verified data loss. Builds a Settings-less tree
+    ' and asserts DoExport raises IE_ERR_NO_SETTINGS and writes nothing.
+    Private Sub T_SettingsGuardFires()
+        Dim d As String
+        d = MakeProjectTree("no-settings", False)     ' withSettings = False
+
+        Dim outFile As String
+        outFile = JoinPath(mTmpDir, "no-settings.twinproj")
+
+        On Error GoTo Caught
+        ' Default requireSettings:=True -- the guard should fire.
+        DoExport d, outFile, True
+        On Error GoTo 0
+        Fail "DoExport should have refused a tree with no Settings"
+        Exit Sub
+Caught:
+        If Err.Number <> IE_ERR_NO_SETTINGS Then
+            Fail "wrong error: 0x" & Hex$(Err.Number) & " " & Err.Description
+        End If
+        ' The guard must abort BEFORE writing -- no partial file left behind.
+        If PathExists(outFile) Then
+            Fail "guard fired but a partial file was left on disk: " & outFile
+        End If
+    End Sub
+
+    ' The complement: with a Settings entry present (as a FILE, its real
+    ' on-disk form), the guard must NOT fire and the pack must succeed. Also
+    ' covers the file-vs-directory point -- an earlier check looked only for a
+    ' Settings *directory* and false-fired on the file form.
+    Private Sub T_SettingsGuardPassesWithFile()
+        Dim d As String
+        d = MakeProjectTree("with-settings", True)     ' withSettings = True
+
+        Dim outFile As String
+        outFile = JoinPath(mTmpDir, "with-settings.twinproj")
+
+        ' Should succeed without raising. Default requireSettings:=True.
+        DoExport d, outFile, True
+        AssertTrue PathExists(outFile), "pack with Settings present did not produce a file"
     End Sub
 
     ' ------------------------------------------------------------- runner
@@ -490,6 +562,8 @@ Caught:
             Case 9:  T_BadMagicRejected
             Case 10: T_TruncationRejected
             Case 11: T_LongPath
+            Case 12: T_SettingsGuardFires
+            Case 13: T_SettingsGuardPassesWithFile
         End Select
         Say "  [PASS] " & name
         mPassed = mPassed + 1
@@ -540,7 +614,9 @@ Failed:
         RunTest 9, "Bad magic rejected", False
         RunTest 10, "Truncated input rejected", False
         RunTest 11, "Long path (>260 chars) round-trip", False
-        
+        RunTest 12, "Settings guard refuses tree with no Settings", False
+        RunTest 13, "Settings guard passes with Settings file present", False
+
         On Error Resume Next
         DeleteTree mTmpDir
         On Error GoTo 0

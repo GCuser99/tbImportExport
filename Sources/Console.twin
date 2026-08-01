@@ -1,6 +1,6 @@
 ' https://github.com/GCuser99/tbImportExport/tree/main
 ' License: MIT
-[PredeclaredId]
+[PredeclaredId(True)]
 Private Class Console
 	
     ' This class gives you a start for working with the console.
@@ -53,11 +53,31 @@ Private Class Console
     End Sub
     
     Sub WriteLine(ByVal Value As String)
-        Dim writtenChars As Long
         Value &= vbLf
-    	WriteConsoleW(stdOut, StrPtr(Value), Len(Value), writtenChars, 0)
-        If writtenChars <> Len(Value) Then
-        	Err.Raise 5, , "failed to write to the console"
+
+        Dim dummyMode As Long
+        If GetConsoleMode(stdOut, dummyMode) <> 0 Then
+            ' stdOut is a real console screen buffer. WriteConsoleW takes
+            ' UTF-16 directly and is the correct call here. A short write to a
+            ' genuine console IS an error worth surfacing, so the check stays.
+            Dim writtenChars As Long
+            WriteConsoleW(stdOut, StrPtr(Value), Len(Value), writtenChars, 0)
+            If writtenChars <> Len(Value) Then
+                Err.Raise 5, , "failed to write to the console"
+            End If
+        Else
+            ' stdOut is redirected to a file or pipe. WriteConsoleW does not
+            ' work on non-console handles -- it fails and writes nothing, which
+            ' is the original "failed to write to the console" bug. WriteFile
+            ' works on any handle, so redirection and piping go through it, as
+            ' UTF-8 bytes. Not reaching a console is normal here, not an error,
+            ' so nothing is raised.
+            Dim b() As Byte, n As Long
+            Utf8Encode Value, b, n
+            If n > 0 Then
+                Dim written As Long
+                WriteFile(stdOut, b(0), n, written, ByVal vbNullPtr)
+            End If
         End If
     End Sub
     
