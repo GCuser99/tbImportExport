@@ -68,7 +68,7 @@ For most folders this is a Git limitation, not a tool limitation, and it is harm
 
 ### The one exception: `Settings`
 
-`Settings` file is different, and `export` treats it differently. It is not an empty scaffolding folder the IDE can regenerate from nothing — it holds the project name, references, version, and compile options. If it is missing, the IDE cannot reconstruct that content: the project opens with its source intact but its references, name, and version blanked.
+`Settings` file is different, and `export` treats it differently. It holds the project name, references, version, and compile options. If it is missing, the IDE cannot reconstruct that content: the project opens with its source intact but its references, name, and version blanked.
 
 So **`export` refuses to pack a directory tree that has no top-level `Settings` file entry**, rather than produce a misleadingly useless file. It stops before writing anything and reports:
 
