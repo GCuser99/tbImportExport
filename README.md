@@ -24,16 +24,6 @@ impexp --self-test [file.twinproj|.twinpack]
 ```
 >Note: you can interchange the argument name `export` with `pack` and `import` with `unpack` - these are synonyms that signal the same thing.
 
-### From twinBASIC
-
-ImpExp.exe can also be run from a twinBASIC project using the `Shell` command.
-```vba
-'The console window stays open (cmd /k) so you can read it - omit the /k to auto-close the command window.
-Shell "cmd.exe /k """"" & <path to ImpExp.exe> & """ export """ & <input_dir> & """ """ & <output.twinproj|.twinpack> & """""", vbNormalFocus
-
-'Redirect the output to a log file
-Shell "cmd.exe /c """"" & <path to ImpExp.exe> & """ export """ & <input_dir> & """ """ & <output.twinproj|.twinpack> & """ > """ & <log file path> & """ 2>&1""", vbNormalFocus
-```
 ### Self-test
 
 The sample path is **optional**. Supply one and all thirteen tests run; omit it and the four sample-driven tests are skipped and the nine synthetic ones still run. A path that is supplied but doesn't exist is treated as an error, since that's almost certainly a typo.
@@ -84,9 +74,7 @@ So **`export` refuses to pack a directory tree that has no top-level `Settings` 
 
 ```
 error: Refusing to pack: no 'Settings' entry at the top level of "<dir>". The packed
-file would open without its references, project name, or version. If this is a fresh
-Git checkout, Settings may have been dropped as an empty folder -- restore it before
-packing.
+file would open without its references, project name, or version.
 ```
 
 In practice `Settings` is usually a file (a name with no extension), not a folder, so Git normally carries it fine. This refusal is mainly a guard against a tree where `Settings` genuinely went missing. If you see it after a fresh checkout, restore the `Settings` entry before packing.
