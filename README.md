@@ -28,10 +28,6 @@ impexp --self-test [file.twinproj|.twinpack]
 
 ImpExp.exe can also be run from a twinBASIC project using the `Shell` command.
 ```vba
-
-The console window opens and closes on its own when the tool finishes; you won't see the output.
-Shell """" & <path to ImpExp.exe> & """ export """ & <input_dir> & """ """ & <output.twinproj|.twinpack> & """", vbNormalFocus
-
 'The console window stays open (cmd /k) so you can read it - omit the /k to auto-close the command window.
 Shell "cmd.exe /k """"" & <path to ImpExp.exe> & """ export """ & <input_dir> & """ """ & <output.twinproj|.twinpack> & """""", vbNormalFocus
 
