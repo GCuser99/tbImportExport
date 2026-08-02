@@ -33,7 +33,7 @@ impexp --self-test [file.twinproj|.twinpack]
 
 ### Self-test
 
-The sample path is **optional**. Supply one and all thirteen tests run; omit it and the four sample-driven tests are skipped and the nine synthetic ones still run. A path that is supplied but doesn't exist is treated as an error, since that's almost certainly a typo.
+The sample path is **optional**. Supply one and all 17 tests run; omit it and the four sample-driven tests are skipped and the nine synthetic ones still run. A path that is supplied but doesn't exist is treated as an error, since that's almost certainly a typo.
 
 Any `.twinproj` or `.twinpack` works — just save a new project from the IDE and run the self-test.
 
@@ -54,7 +54,11 @@ Expected output:
   [PASS] Long path (>260 chars) round-trip
   [PASS] Settings guard refuses tree with no Settings
   [PASS] Settings guard passes with Settings file present
-  13/13 tests passed.
+  [PASS] Export overwrite guard refuses existing file
+  [PASS] Export overwrite proceeds with overwrite flag
+  [PASS] Clean-first removes stale files
+  [PASS] Clean-first depth guard (PathDepth logic)
+  17/17 tests passed.
 ```
 
 The sample tests proves the port is self-consistent: parse, serialize, and disk round-trips all agree, and the output matches the round-trip behavior the docs specify. However, it does **not** prove the IDE accepts the output. Before trusting this on real work: unpack a project, pack it back, and open the result in twinBASIC. The IDE regenerates the reset metadata on open, so a round-tripped file should load and build — but your build of the IDE is the only authority on that.
