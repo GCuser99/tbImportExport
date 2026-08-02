@@ -27,9 +27,9 @@ impexp --self-test [file.twinproj|.twinpack]
 **Options.** Flags may appear anywhere after the verb.
 
 | Flag | Applies to | Effect |
-|---|---|---|
-| `--clean` | import / unpack | Empty the output directory before unpacking, so no files from a previous unpack linger. Refuses to clean a dangerously shallow target (a drive root or a single top-level folder). |
-| `--force` | export / pack | Overwrite the output file if it already exists. Without it, export refuses rather than clobber an existing `.twinproj` — see below. |
+|-----------|-----------------|---|
+| clean | import / unpack | Empty the output directory before unpacking, so no files from a previous unpack linger. Refuses to clean a dangerously shallow target (a drive root or a single top-level folder). |
+| force | export / pack | Overwrite the output file if it already exists. Without it, export refuses rather than clobber an existing `.twinproj` — see below. |
 
 An unrecognized flag, or a flag applied to the wrong verb (`--force` on import, `--clean` on export), is reported as an error rather than silently ignored, so a typo in a destructive flag can't quietly become a no-op.
 
@@ -77,7 +77,7 @@ The usual workflow is: `import` a `.twinproj` into a directory tree, commit that
 
 For most folders this is a Git limitation, not a tool limitation, and it is harmless. `export` packs exactly what is present on disk: if an empty folder was dropped by Git, it simply won't be in the resulting `.twinproj`. When you then open that file, **twinBASIC recreates the folders it expects on its own.** The round trip comes out whole because the IDE reconstructs the missing structure, not because the packed file carried it. So don't rely on the packed `.twinproj` to preserve empty folders across a Git round trip — rely on the IDE to regenerate them, which it does.
 
-### The one exception: `Settings`
+### The one exception: Settings
 
 `Settings` file is different, and `export` treats it differently. It holds the project name, references, version, and compile options. If it is missing, the IDE cannot reconstruct that content: the project opens with its source intact but its references, name, and version blanked.
 
@@ -94,14 +94,14 @@ In practice `Settings` is usually a file (a name with no extension), not a folde
 
 | File | Contents |
 |---|---|
-| `Entry.twin` | Tree node. Arrays are private with accessors. |
-| `ByteBuffer.twin` | Append-only output buffer with capacity doubling. |
-| `ByteReader.twin` | Bounds-checked little-endian cursor. |
-| `modWin32.twin` | Win32 Declares (optional if reference to WinDevLib) |
-| `modShared.twin` | UTF-8, path/filesystem helpers, ordinal sort. |
-| `modImpExp.twin` | Parser, serializer, import, export. |
-| `modSelfTest.twin` | Test suite. |
-| `modMain.twin` | CLI, argument splitting, `Say`. |
+| Entry.twin | Tree node. Arrays are private with accessors. |
+| ByteBuffer.twin | Append-only output buffer with capacity doubling. |
+| ByteReader.twin | Bounds-checked little-endian cursor. |
+| modWin32.twin | Win32 Declares (optional if reference to WinDevLib) |
+| modShared.twin | UTF-8, path/filesystem helpers, ordinal sort. |
+| modImpExp.twin | Parser, serializer, import, export. |
+| modSelfTest.twin | Test suite. |
+| modMain.twin | CLI, argument splitting, `Say`. |
 
 ## License
 
