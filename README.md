@@ -16,13 +16,24 @@ documented at <https://docs.twinbasic.com/Features/Packages/Import-Export-Tool>.
 
 ### Command Line
 
-Use `import` flag to unpack a .twinproj or .twinpack file into a text file directory tree. Conversely, use `export` to pack an unpacked directory tree into a .twinproj or .twinpack file.
+Use `import` (or `unpack`) to unpack a .twinproj or .twinpack file into a text file directory tree. Conversely, use `export` (or `pack`) to pack an unpacked directory tree into a .twinproj or .twinpack file.
 ```
-impexp import <file.twinproj|.twinpack> [output_dir]
-impexp export <input_dir> <output.twinproj|.twinpack>
+impexp import <file.twinproj|.twinpack> [output_dir] [--clean]
+impexp export <input_dir> <output.twinproj|.twinpack> [--force]
 impexp --self-test [file.twinproj|.twinpack]
 ```
 >Note: you can interchange the argument name `export` with `pack` and `import` with `unpack` - these are synonyms that signal the same thing.
+
+**Options.** Flags may appear anywhere after the verb.
+
+| Flag | Applies to | Effect |
+|---|---|---|
+| `--clean` | import / unpack | Empty the output directory before unpacking, so no files from a previous unpack linger. Refuses to clean a dangerously shallow target (a drive root or a single top-level folder). |
+| `--force` | export / pack | Overwrite the output file if it already exists. Without it, export refuses rather than clobber an existing `.twinproj` — see below. |
+
+An unrecognized flag, or a flag applied to the wrong verb (`--force` on import, `--clean` on export), is reported as an error rather than silently ignored, so a typo in a destructive flag can't quietly become a no-op.
+
+**Why export refuses by default.** The `.twinproj` is the source of truth for a project; unlike an unpacked tree, there is nothing to regenerate it from once overwritten. So `export` refuses to overwrite an existing output file unless you pass `--force`. Unpacking is the safe direction — the tree it writes is a derived artifact — so `import` overwrites freely, and `--clean` is offered only as a convenience for a tidy result.
 
 ### Self-test
 

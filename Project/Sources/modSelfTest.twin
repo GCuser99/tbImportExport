@@ -539,6 +539,155 @@ Caught:
         DoExport d, outFile, True
         AssertTrue PathExists(outFile), "pack with Settings present did not produce a file"
     End Sub
+    
+    ' The export overwrite guard must refuse an existing output file by
+    ' default, and must proceed when overwrite:=True. The .twinproj is the
+    ' source of truth -- unlike an unpacked tree it cannot be regenerated --
+    ' so clobbering it silently would be real data loss.
+    Private Sub T_OverwriteGuardFires()
+        Dim d As String
+        d = MakeProjectTree("ow-src", True)          ' has Settings, so it packs
+
+        Dim outFile As String
+        outFile = JoinPath(mTmpDir, "ow.twinproj")
+
+        ' First pack creates the file.
+        DoExport d, outFile, True
+        AssertTrue PathExists(outFile), "first pack did not produce a file"
+
+        ' Second pack, default overwrite:=False, must refuse.
+        On Error GoTo Caught
+        DoExport d, outFile, True
+        On Error GoTo 0
+        Fail "DoExport should have refused to overwrite an existing file"
+        Exit Sub
+Caught:
+        If Err.Number <> IE_ERR_TARGET_EXISTS Then
+            Fail "wrong error: 0x" & Hex$(Err.Number) & " " & Err.Description
+        End If
+    End Sub
+
+    ' The complement: overwrite:=True must replace an existing file without
+    ' raising.
+    Private Sub T_OverwritePassesWithFlag()
+        Dim d As String
+        d = MakeProjectTree("ow2-src", True)
+
+        Dim outFile As String
+        outFile = JoinPath(mTmpDir, "ow2.twinproj")
+
+        DoExport d, outFile, True                     ' create
+        DoExport d, outFile, True, overwrite:=True     ' replace -- must not raise
+        AssertTrue PathExists(outFile), "overwrite pack did not produce a file"
+    End Sub
+
+    ' cleanFirst must empty the target before unpacking, so files left from a
+    ' previous unpack do not survive. Also checks the complement: a stray file
+    ' present WITHOUT cleanFirst survives (proving the clean is what removed
+    ' it, not something else).
+    Private Sub T_CleanFirstRemovesStale()
+        ' Build a tiny pack to unpack from.
+        Dim src As String
+        src = MakeProjectTree("clean-src", True)
+        Dim packFile As String
+        packFile = JoinPath(mTmpDir, "clean.twinproj")
+        DoExport src, packFile, True
+
+        Dim target As String
+        target = JoinPath(mTmpDir, "clean-target")
+
+        ' First unpack, then plant a stray file that the pack does not contain.
+        DoImport packFile, target, True
+        Dim junk() As Byte, jn As Long
+        Utf8Encode "stale", junk, jn
+        Dim strayPath As String
+        strayPath = JoinPath(target, "STRAY_LEFTOVER.txt")
+        WriteWholeFile strayPath, junk, jn
+        AssertTrue PathExists(strayPath), "could not plant stray file"
+
+        ' Unpack again WITHOUT cleanFirst -- stray should survive.
+        DoImport packFile, target, True
+        AssertTrue PathExists(strayPath), "stray vanished without cleanFirst (unexpected)"
+
+        ' Unpack again WITH cleanFirst -- stray must be gone.
+        DoImport packFile, target, True, cleanFirst:=True
+        AssertTrue Not PathExists(strayPath), "cleanFirst did not remove the stray file"
+    End Sub
+
+    ' cleanFirst must refuse a dangerously shallow target rather than
+    ' recursively deleting it. Uses a fabricated shallow path; the guard
+    ' fires on PathDepth, so no actual delete is attempted.
+    /*
+    Private Sub T_CleanFirstDepthGuard()
+        ' A depth-1 path: drive root plus one segment. PathDepth = 1 < 2, so
+        ' the guard must fire. This directory need not exist as far as the
+        ' depth check is concerned, but DoImport only cleans if IsDirectory is
+        ' true -- so point at a real shallow dir we create and then leave.
+        ' Use the drive of the temp dir to stay on a valid volume.
+        Dim drive As String
+        drive = Left$(AbsPath(mTmpDir), 2)            ' e.g. "C:"
+        Dim shallow As String
+        shallow = drive & "\impexp_depthguard_probe"
+
+        ' We do NOT create it -- IsDirectory is false, so DoImport would skip
+        ' cleaning entirely and the guard would not be exercised. To actually
+        ' hit the guard, create it, and rely on the guard to prevent deletion.
+        EnsureDirectory shallow
+
+        Dim packFile As String
+        Dim src As String
+        src = MakeProjectTree("depth-src", True)
+        packFile = JoinPath(mTmpDir, "depth.twinproj")
+        DoExport src, packFile, True
+
+        On Error GoTo Caught
+        DoImport packFile, shallow, True, cleanFirst:=True
+        On Error GoTo 0
+        ' If we reach here the guard did NOT fire -- clean up and fail.
+        On Error Resume Next
+        DeleteTree shallow
+        On Error GoTo 0
+        Fail "cleanFirst should have refused a shallow (depth 1) target"
+        Exit Sub
+Caught:
+        Dim wasGuard As Boolean
+        wasGuard = (InStr(Err.Description, "shallow") > 0)
+        ' Clean up the probe dir regardless.
+        On Error Resume Next
+        DeleteTree shallow
+        On Error GoTo 0
+        If Not wasGuard Then
+            Fail "wrong error: 0x" & Hex$(Err.Number) & " " & Err.Description
+        End If
+    End Sub
+    */
+    
+    ' The clean-first depth guard rests entirely on PathDepth, so test that
+    ' function directly rather than exercising a real recursive delete on a
+    ' shallow directory (which would mean creating a folder at a drive root).
+    ' Pure and side-effect-free: it asserts the segment-counting that the
+    ' guard's "< 2" threshold depends on. If these values are right, the
+    ' guard refuses drive roots and single-level folders and permits normal
+    ' project paths.
+    Private Sub T_PathDepthGuard()
+        ' Drive-letter paths. Depth is segments below the drive root.
+        AssertEqL PathDepth("C:\"), 0, "drive root depth"
+        AssertEqL PathDepth("C:\Downloads"), 1, "single-level depth"
+        AssertEqL PathDepth("C:\Users\me\proj"), 3, "three-level depth"
+
+        ' Trailing separator must not change the count.
+        AssertEqL PathDepth("C:\Users\me\proj\"), 3, "trailing-sep depth"
+
+        ' The guard's threshold: < 2 is refused, >= 2 is allowed.
+        AssertTrue PathDepth("C:\") < 2, "drive root must be refused"
+        AssertTrue PathDepth("C:\Downloads") < 2, "single-level must be refused"
+        AssertTrue PathDepth("C:\a\b") >= 2, "two-level must be allowed"
+
+        ' UNC: depth is measured below the share root, so \\server\share is 0.
+        AssertEqL PathDepth("\\server\share"), 0, "UNC share root depth"
+        AssertEqL PathDepth("\\server\share\proj"), 1, "UNC one-level depth"
+        AssertEqL PathDepth("\\server\share\a\b"), 2, "UNC two-level depth"
+    End Sub
 
     ' ------------------------------------------------------------- runner
 
@@ -564,6 +713,10 @@ Caught:
             Case 11: T_LongPath
             Case 12: T_SettingsGuardFires
             Case 13: T_SettingsGuardPassesWithFile
+            Case 14: T_OverwriteGuardFires
+            Case 15: T_OverwritePassesWithFlag
+            Case 16: T_CleanFirstRemovesStale
+            Case 17: T_PathDepthGuard
         End Select
         Say "  [PASS] " & name
         mPassed = mPassed + 1
@@ -616,6 +769,10 @@ Failed:
         RunTest 11, "Long path (>260 chars) round-trip", False
         RunTest 12, "Settings guard refuses tree with no Settings", False
         RunTest 13, "Settings guard passes with Settings file present", False
+        RunTest 14, "Export overwrite guard refuses existing file", False
+        RunTest 15, "Export overwrite proceeds with overwrite flag", False
+        RunTest 16, "Clean-first removes stale files", False
+        RunTest 17, "Clean-first depth guard (PathDepth logic)", False
 
         On Error Resume Next
         DeleteTree mTmpDir

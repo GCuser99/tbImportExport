@@ -12,9 +12,12 @@ Module modMain
 
     Private Const USAGE As String = _
         "Usage:" & vbCrLf & _
-        "  impexp import <file.twinproj|.twinpack> [output_dir]" & vbCrLf & _
-        "  impexp export <input_dir> <output.twinproj|.twinpack>" & vbCrLf & _
-        "  impexp --self-test [file.twinproj|.twinpack]"
+        "  impexp import <file.twinproj|.twinpack> [output_dir] [--clean]" & vbCrLf & _
+        "  impexp export <input_dir> <output.twinproj|.twinpack> [--force]" & vbCrLf & _
+        "  impexp --self-test [file.twinproj|.twinpack]" & vbCrLf & _
+        "" & vbCrLf & _
+        "  --clean   empty the output directory before importing" & vbCrLf & _
+        "  --force   overwrite the output file if it already exists"
 
     ' Single point of change for console output. If your twinBASIC build's
     ' Console class exposes a different method name, change it here only.
@@ -75,11 +78,43 @@ Module modMain
         End If
     End Sub
 
+    ' Scans args for a "--name" flag (case-insensitive). If found, returns
+    ' True and removes it from the array in place, compacting the remainder
+    ' and decrementing count -- so the positional arguments the caller reads
+    ' afterwards are unaffected by where the flag appeared on the line.
+    Private Function HasFlag(ByRef args() As String, ByRef count As Long, ByVal name As String) As Boolean
+        Dim i As Long, j As Long
+        Dim found As Boolean
+        found = False
+        i = 0
+        Do While i < count
+            If LCase$(args(i)) = LCase$(name) Then
+                found = True
+                For j = i To count - 2
+                    args(j) = args(j + 1)
+                Next
+                count = count - 1
+            Else
+                i = i + 1
+            End If
+        Loop
+        Return found
+    End Function
+
     ' Exit codes matter for CI use. ExitProcess terminates immediately and
     ' skips Class_Terminate, which is fine here -- nothing holds an OS
     ' resource by the time we return.
     Private Sub Halt(ByVal code As Long)
         If code <> 0 Then ExitProcess code
+    End Sub
+
+    ' Report a usage error and exit non-zero. Prints the specific problem,
+    ' then the usage text, so the user sees both what was wrong and the
+    ' correct forms. Callers Exit Sub immediately after.
+    Private Sub Reject(ByVal msg As String)
+        Say "error: " & msg
+        Say USAGE
+        Halt 1
     End Sub
 
     Public Sub Main()
@@ -89,6 +124,26 @@ Module modMain
         On Error GoTo Fail
         SplitArgs Command$(), args, n
         If n = 0 Then GoTo Usage
+
+        ' Pull flags out first, so they may appear anywhere after the verb and
+        ' the positional arguments below keep their fixed indices.
+        Dim doClean As Boolean, doForce As Boolean
+        doClean = HasFlag(args, n, "--clean")
+        doForce = HasFlag(args, n, "--force")
+
+        ' Any token still starting with "--" was not a flag we recognize.
+        ' Silently ignoring it would let a typo in a destructive flag
+        ' (--force, --clean) become a no-op with no signal -- exactly the
+        ' failure that hides a mistake -- so reject it. "--self-test" is a
+        ' verb in position 0, checked below, so it is exempt here.
+        Dim fi As Long
+        For fi = 0 To n - 1
+            If Left$(args(fi), 2) = "--" And LCase$(args(fi)) <> "--self-test" Then
+                Reject "unknown option: " & args(fi)
+                Exit Sub
+            End If
+        Next
+
         Select Case LCase$(args(0))
             Case "--self-test"
                 ' The sample path is optional; without it the four
@@ -102,6 +157,15 @@ Module modMain
                 End If
                 Halt rc
             Case "import", "unpack"
+                ' --force is an export concept (overwrite the output file);
+                ' it has no meaning for import. Reject rather than ignore, so
+                ' a user who reached for the wrong flag is told, not silently
+                ' given behaviour they didn't ask for.
+                If doForce Then
+                    Reject "--force does not apply to " & LCase$(args(0)) & _
+                           " (did you mean --clean?)"
+                    Exit Sub
+                End If
                 ' Resolve arguments to absolute, canonical paths at the
                 ' boundary so everything downstream deals only in absolute
                 ' paths. The empty output-dir case stays empty: DoImport
@@ -109,13 +173,20 @@ Module modMain
                 ' and AbsPath("") would wrongly turn that into the CWD.
                 If n < 2 Then GoTo Usage
                 If n >= 3 Then
-                    DoImport AbsPath(args(1)), AbsPath(args(2)), False
+                    DoImport AbsPath(args(1)), AbsPath(args(2)), False, cleanFirst:=doClean
                 Else
-                    DoImport AbsPath(args(1)), "", False
+                    DoImport AbsPath(args(1)), "", False, cleanFirst:=doClean
                 End If
             Case "export", "pack"
+                ' --clean is an import concept (empty the target tree first);
+                ' it has no meaning for export. Reject rather than ignore.
+                If doClean Then
+                    Reject "--clean does not apply to " & LCase$(args(0)) & _
+                           " (did you mean --force?)"
+                    Exit Sub
+                End If
                 If n < 3 Then GoTo Usage
-                DoExport AbsPath(args(1)), AbsPath(args(2)), False
+                DoExport AbsPath(args(1)), AbsPath(args(2)), False, overwrite:=doForce
             Case Else
                 GoTo Usage
         End Select

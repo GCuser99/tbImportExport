@@ -211,7 +211,59 @@ Module modShared
         Close #f
     End Sub
 
-    ' Recursive delete, used only by the self-test cleanup.
+    ' Counts path segments below the drive root, so callers can refuse to
+    ' recursively delete something dangerously shallow. "C:\" -> 0,
+    ' "C:\Downloads" -> 1, "C:\Users\me\proj" -> 3. UNC roots
+    ' (\\server\share) count the share as depth 0 as well. Used to guard the
+    ' clean-first delete in DoImport against a fat-fingered target like a
+    ' drive root.
+    Public Function PathDepth(ByVal p As String) As Long
+        Dim full As String
+        full = AbsPath(p)
+        ' Strip a trailing separator so "C:\foo\" and "C:\foo" agree.
+        Do While Len(full) > 1 And (Right$(full, 1) = "\" Or Right$(full, 1) = "/")
+            full = Left$(full, Len(full) - 1)
+        Loop
+
+        Dim body As String
+        If Left$(full, 2) = "\\" Then
+            ' UNC: skip "\\", then drop server and share, each a segment we do
+            ' NOT count -- depth is measured below the share root.
+            Dim rest As String
+            rest = Mid$(full, 3)
+            Dim slash1 As Long, slash2 As Long
+            slash1 = InStr(rest, "\")
+            If slash1 = 0 Then Return 0                 ' just \\server
+            slash2 = InStr(slash1 + 1, rest, "\")
+            If slash2 = 0 Then Return 0                 ' \\server\share
+            body = Mid$(rest, slash2 + 1)
+        Else
+            ' Drive-letter path: drop "X:" then the leading separator.
+            Dim colon As Long
+            colon = InStr(full, ":")
+            If colon = 0 Then
+                body = full                             ' unusual, treat whole as body
+            Else
+                body = Mid$(full, colon + 1)
+                Do While Len(body) > 0 And (Left$(body, 1) = "\" Or Left$(body, 1) = "/")
+                    body = Mid$(body, 2)
+                Loop
+            End If
+        End If
+
+        If Len(body) = 0 Then Return 0
+        Dim parts() As String
+        parts = Split(Replace$(body, "/", "\"), "\")
+        Dim depth As Long, i As Long
+        depth = 0
+        For i = LBound(parts) To UBound(parts)
+            If Len(parts(i)) > 0 Then depth = depth + 1
+        Next
+        Return depth
+    End Function
+
+    ' Recursive delete, used by the self-test cleanup and the clean-first
+    ' option in DoImport.
     Public Sub DeleteTree(ByVal dirPath As String)
         If Not IsDirectory(dirPath) Then Exit Sub
         Dim names() As String, isDir() As Boolean, n As Long, i As Long

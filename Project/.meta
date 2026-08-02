@@ -1,0 +1,110 @@
+{
+	"rootFolder": "/NewProject",
+	"fs_expandedFolders": [
+		"/NewProject",
+		"/NewProject/Sources"
+	],
+	"openEditors": [
+		{
+			"uri": "/NewProject/Sources/MainModule.twin",
+			"state": {
+				"cursorState": [
+					{
+						"inSelectionMode": false,
+						"selectionStart": {
+							"lineNumber": 4,
+							"column": 5
+						},
+						"position": {
+							"lineNumber": 4,
+							"column": 5
+						}
+					}
+				],
+				"viewState": {
+					"scrollLeft": 0,
+					"firstPosition": {
+						"lineNumber": 1,
+						"column": 1
+					},
+					"firstPositionDeltaTop": 0
+				},
+				"contributionsState": {
+					"editor.contrib.wordHighlighter": false,
+					"editor.contrib.folding": {
+						"lineCount": 20,
+						"provider": "syntax",
+						"foldedImports": false
+					}
+				}
+			},
+			"isSelected": true
+		}
+	],
+	"debugConsoleEntryHistory": [],
+	"variables_expandedCache": {
+		"/Locals": true
+	},
+	"watches": [],
+	"watches_expandedCache": {},
+	"outlinePanelOptions": {
+		"showClassFields": true,
+		"showModuleVariables": true,
+		"showEnumerations": true,
+		"showUDTs": true,
+		"showDLLs": true,
+		"showConstructors": true,
+		"showProperties": true,
+		"showProcedures": true,
+		"showVariables": true,
+		"showParameters": true
+	},
+	"debugPanelOptions": {
+		"invertDirection": false,
+		"showTimestamps": true
+	},
+	"problemsPanelOptions": {
+		"showErrors": true,
+		"showWarnings": true,
+		"showHints": false,
+		"showInfos": false
+	},
+	"history": [],
+	"toolWindows": [],
+	"bookmarks": {
+		"/NewProject/Sources/ByteBuffer.twin": {},
+		"/NewProject/Sources/ByteReader.twin": {},
+		"/NewProject/Sources/Console.twin": {},
+		"/NewProject/Sources/Entry.twin": {},
+		"/NewProject/Sources/MainModule.twin": {},
+		"/NewProject/Sources/modImpExp.twin": {},
+		"/NewProject/Sources/modMain.twin": {},
+		"/NewProject/Sources/modSelfTest.twin": {},
+		"/NewProject/Sources/modWin32.twin": {}
+	},
+	"searchInsidePackages": false,
+	"searchCaseSensitive": false,
+	"searchWholeWordOnly": false,
+	"objectExplorerExpandedNodes": [
+		65535,
+		0,
+		1,
+		2,
+		3,
+		4,
+		5,
+		6,
+		7,
+		8,
+		9
+	],
+	"findReplaceHistory": {},
+	"findReplaceOptions": {
+		"InsidePackages": false,
+		"WholeWordOnly": false,
+		"MatchCase": false,
+		"PatternMatching": false,
+		"RegularExpressions": false
+	},
+	"memoryPanelsHistory": {}
+}

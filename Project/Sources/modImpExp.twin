@@ -52,6 +52,8 @@ Private Module modImpExp
     Public Const IE_ERR_BAD_UTF8 As Long = vbObjectError + 1004
     Public Const IE_ERR_IO As Long = vbObjectError + 1005
     Public Const IE_ERR_NO_SETTINGS As Long = vbObjectError + 1006
+    Public Const IE_ERR_TARGET_EXISTS As Long = vbObjectError + 1007
+    Public Const IE_ERR_SHALLOW_TARGET As Long = vbObjectError + 1008
 
     Public Enum EntryKindEnum
         ekFile = 1
@@ -256,7 +258,8 @@ Propagate:
 
     Public Function DoImport(ByVal inputPath As String, _
                              ByVal outputDir As String, _
-                             ByVal quiet As Boolean) As IE_RESULT
+                             ByVal quiet As Boolean, _
+                             Optional ByVal cleanFirst As Boolean = False) As IE_RESULT
         Dim data() As Byte
         Dim length As Long
         ReadWholeFile inputPath, data, length
@@ -268,6 +271,23 @@ Propagate:
 
         Dim res As IE_RESULT
         res.Name = root.Name
+
+        ' Clean-first: empty the target before unpacking so no files from a
+        ' previous unpack linger. Only relevant if the target already exists;
+        ' a fresh target has nothing to clean. Overwriting an unpacked tree is
+        ' the safe direction (it is a derived artifact -- the .twinproj is the
+        ' source of truth), so no opt-in is required, but a recursive delete
+        ' driven by an argument still gets a sanity guard: refuse a target so
+        ' shallow it is probably a mistake (drive root, single-level folder).
+        If cleanFirst And IsDirectory(outputDir) Then
+            If PathDepth(outputDir) < 2 Then
+                Err.Raise IE_ERR_SHALLOW_TARGET, "DoImport", _
+                    "Refusing to clean a shallow path: """ & outputDir & """. " & _
+                    "Clean-first will not recursively delete a drive root or a " & _
+                    "top-level folder. Choose a deeper target directory."
+            End If
+            DeleteTree outputDir
+        End If
 
         EnsureDirectory outputDir
 
@@ -305,9 +325,23 @@ Propagate:
 
     Public Function DoExport(ByVal inputDir As String, ByVal outputPath As String, _
         ByVal quiet As Boolean, _
-        Optional ByVal requireSettings As Boolean = True) As IE_RESULT
+        Optional ByVal requireSettings As Boolean = True, _
+        Optional ByVal overwrite As Boolean = False) As IE_RESULT
         If Not IsDirectory(inputDir) Then
             Err.Raise IE_ERR_IO, "DoExport", "Not a directory: " & inputDir
+        End If
+        ' Overwrite guard: the output .twinproj is the source of truth for a
+        ' project -- unlike an unpacked tree, there is nothing to regenerate
+        ' it from once overwritten. So refuse to clobber an existing output
+        ' unless the caller explicitly opts in. Raised BEFORE BuildTree so a
+        ' refusal does no work and touches nothing.
+        If Not overwrite Then
+            If PathExists(outputPath) Then
+                Err.Raise IE_ERR_TARGET_EXISTS, "DoExport", _
+                    "Output already exists: """ & outputPath & """. " & _
+                    "Refusing to overwrite it. Use the overwrite option (CLI: --force) " & _
+                    "to replace it."
+            End If
         End If
         Dim root As Entry
         Set root = BuildTree(inputDir)
