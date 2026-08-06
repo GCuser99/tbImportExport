@@ -3,6 +3,12 @@
 A twinBASIC port of `impexp.py`, the standalone twinproj/twinpack import/export tool
 documented at <https://docs.twinbasic.com/Features/Packages/Import-Export-Tool>.
 
+## Why use this
+
+The most common use is keeping an ASCII representation of your twinBASIC projects under version control. A `.twinproj` file is binary — opaque to Git, undiffable, and unmergeable — so committing it directly gives you none of what version control is for. Unpacking it into a directory tree of plain text files means Git can show you real diffs and it means your project's history is readable by anything that reads text.
+
+Beyond storage, the tool is well suited to code-management automation, because pack and unpack are ordinary command-line (or in-code) operations you can script. One workflow it enables: keep a master development copy of a project, then unpack it, modify or strip the copy, and repack it for publication — all without touching the dev copy. For example, if your development project contains source helpers, scratch code, or scaffolding you don't want to ship, a script can unpack a fresh copy, remove those pieces, and pack the result into a clean .twinproj for release. The master stays intact; the published artifact is derived from it on demand rather than hand-edited into existence.
+
 ## Setup
 
 1. Download ImportExport.twinproj or load the Source .twin files into a twinBASIC console app project.
