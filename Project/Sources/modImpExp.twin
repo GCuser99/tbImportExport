@@ -262,6 +262,14 @@ Propagate:
                              Optional ByVal cleanFirst As Boolean = False) As IE_RESULT
         Dim data() As Byte
         Dim length As Long
+        
+        If Not PathExists(inputPath) Then
+            Err.Raise IE_ERR_IO, "DoImport", "Input file not found: " & inputPath
+        End If
+        If IsDirectory(inputPath) Then
+            Err.Raise IE_ERR_IO, "DoImport", "Input is a directory, not a file: " & inputPath
+        End If
+        
         ReadWholeFile inputPath, data, length
 
         Dim root As Entry
@@ -327,6 +335,7 @@ Propagate:
         ByVal quiet As Boolean, _
         Optional ByVal requireSettings As Boolean = True, _
         Optional ByVal overwrite As Boolean = False) As IE_RESULT
+        
         If Not IsDirectory(inputDir) Then
             Err.Raise IE_ERR_IO, "DoExport", "Not a directory: " & inputDir
         End If
